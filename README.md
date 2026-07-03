@@ -333,6 +333,67 @@ selection — reproducible, hash-provable), **model judgment where valuable**
   credit quality (not published in the scraped table), Index columns of the
   risk tables (mostly em-dash on Morningstar India).
 
+> **Disclaimer:** this repo produces data and arithmetic, not investment
+> advice. Past performance does not predict future returns; mutual fund
+> investments are subject to market risk.
+
+## Alternate engine: NAV-based deterministic selection (`mf_select.py`)
+
+`selection/mf_select.py` is a second, independent selection framework — rules
+-based, reproducible selection of 3–4 Direct-Growth funds for a >10-year
+horizon, using raw NAV history (via the `indian-mf-data` dataset tooling)
+instead of Morningstar's scraped risk tables. It predates the Morningstar
+pipeline above and remains useful when you have (or want to compute alpha
+from) a raw NAV/benchmark-TRI dataset rather than Morningstar's published
+metrics. It ships its own gates, scoring, selection and determinism
+guarantees — see `docs/FRAMEWORK.md` for the full specification and honesty
+notes (survivorship bias in category composites, realistic overlap
+thresholds, Direct-plan history starting 2013).
+
+```
+selection/
+├── mf_select.py            # this framework (stdlib only, no dependencies)
+└── framework_config.json   # all rules: universe, gates, weights, selection
+docs/FRAMEWORK.md           # full specification and honesty notes
+tests/test_mf_select.py     # pytest wrapper over the deterministic selftest
+benchmarks/                 # you supply: <KEY>.csv with date,value (TRI!)
+holdings/                   # you supply: <scheme_code>.csv with isin,weight_pct
+```
+
+```bash
+# 1. verify the framework's own guarantees (no data needed)
+python selection/mf_select.py --selftest
+
+# 2. build the NAV dataset (indian-mf-data tooling, separate from this repo)
+python scripts/build_mf_dataset.py --out mf_dataset
+
+# 3. run a selection
+python selection/mf_select.py \
+    --dataset mf_dataset \
+    --config selection/framework_config.json \
+    --benchmarks benchmarks/ \
+    --holdings holdings/ \
+    --out runs/2026-07
+```
+
+The report (`runs/2026-07/report.json`) contains the full ranking, per-gate
+results, the selection with a decision log for every skip, the overlap
+matrix, and a `run_hash` + `config_hash` + per-file `input_hashes` manifest —
+same reproducibility contract as the Morningstar engine: identical config
+hash + input hashes ⇒ identical `run_hash`, always; if two runs differ, the
+hashes tell you it's the data, never the logic. Pin `"as_of"` in the config to
+freeze a snapshot for repeatable audits.
+
+**What you must supply, and why the framework won't guess:**
+- **Benchmark TRI CSVs** (`benchmarks/<KEY>.csv`, columns `date,value`) from
+  niftyindices.com — NAV data contains no index, and using a price index
+  instead of TRI fabricates ~1.2–1.5%/yr of fake alpha. Without these, the
+  alpha-vs-index and capture gates are marked *not evaluated*.
+- **Holdings CSVs** (`holdings/<scheme_code>.csv`, columns `isin,weight_pct`)
+  from AMC monthly portfolio disclosures. Without these, pairwise overlap
+  cannot be computed and the framework falls back to one-fund-per-category /
+  one-per-AMC and says so — it never silently claims "<10% overlap".
+
 ## Claude skills
 
 Two project skills automate the workflow end-to-end (see
