@@ -1,0 +1,9 @@
+# Browser-automation deps for scraper/morningstar_fund_details.py.
+# The PURE CORE (parsing + pagination logic) and its tests need NONE of these —
+# selenium is imported lazily, so `pytest tests/test_morningstar_parse.py` runs
+# in browserless CI. Install these only to run the live scrape.
+selenium>=4.15
+webdriver-manager>=4.0
+
+# Test runner for the browserless pure-core suite (tests/test_morningstar_parse.py).
+pytest>=7.0
