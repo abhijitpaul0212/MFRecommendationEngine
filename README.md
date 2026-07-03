@@ -1,6 +1,63 @@
 # MFRecommendationEngine
 
-Here is a 4-step framework you can run periodically to identify 3-4 high-performing funds with high confidence and controlled risk.Step 1: Asset Allocation (The Structural Foundation)To ensure your portfolio has less than 10% overlap, you cannot pick funds from the same category or with the identical investment styles. For a 3-4 fund portfolio over a 10-year horizon, structure your core and satellite buckets first:Fund 1 (Core Anchor): Flexi Cap or Large & Mid Cap (Focus: Stability and steady compounding).Fund 2 (Growth Satellite): Mid Cap Fund (Focus: Alpha generation).Fund 3 (Aggressive Satellite): Small Cap Fund (Focus: Long-term explosive growth).Fund 4 (Hedge/Diversifier): Value Fund, Multi-Asset, or International Index (Focus: Low correlation to the broader Indian growth market).Step 2: The Quantitative Filter (Risk & Alpha)This is where your technical indicators come in. Run a fund screener with these exact parameters to filter the universe of direct funds:Alpha (Excess Return): Look for an Alpha of > 2.0. More importantly, the Alpha must be positive against both the benchmark index and the category average. This proves the fund manager has stock-picking skill rather than just riding a bull market.Calculation: $\alpha = R_p - [R_f + \beta (R_m - R_f)]$Sharpe Ratio (Risk-Adjusted Return): This measures how much excess return you receive for the volatility you are enduring. Aim for a Sharpe Ratio > 1.5, or firmly in the top quartile of the category.Calculation: $S = \frac{R_p - R_f}{\sigma_p}$Sortino Ratio (Downside Protection): Often more critical than Sharpe, Sortino only penalizes downward volatility. A higher Sortino ratio indicates the fund protects your capital better during market corrections.Beta (Market Sensitivity): * Core Fund: Aim for a Beta of ~0.85 to 0.95 (meaning it falls less than the market during crashes).Satellite Funds: A Beta of 1.0 to 1.15 is acceptable only if the Alpha is exceptionally high to compensate for the extra volatility.Step 3: The Overlap Test (True Diversification)Once you have top funds from Step 2, run them through a portfolio overlap tool.The Problem: If you buy a Flexi Cap and a Large Cap fund, you might be buying HDFC Bank and Reliance twice, paying two expense ratios for the exact same underlying assets.The Rule: Compare Fund 1 vs Fund 2, Fund 1 vs 3, etc. Reject any fund that shares more than 10% of its underlying stock portfolio with another fund in your selection.Pro-Tip: Choosing funds from different Asset Management Companies (AMCs) and contrasting investment styles (e.g., pairing a 'Growth' AMC with a 'Value' AMC) naturally reduces overlap.Step 4: The Repeatability & Authenticity CheckTo ensure this framework yields the same level of confidence every time you run it:Use Rolling Returns: Never look at point-to-point "1-year" or "3-year" returns. Look at 3-year and 5-year rolling returns. A fund should beat its benchmark >70% of the time on a rolling basis. This removes the luck of market timing.Manager Consistency: Ensure the current fund manager has been at the helm for at least 3 to 5 years. A fund's historical Alpha belongs to the manager, not the AMC. If the manager leaves, the framework requires you to re-evaluate the fund.
+## The founding framework (manual process this repo automates)
+
+A 4-step process to identify 3–4 high-performing funds with high confidence
+and controlled risk, run periodically. This is the conceptual origin of the
+buckets, overlap rule and gates below — "Framework Step N" elsewhere in this
+document refers back to these four steps (distinct from the pipeline's own
+numbered run steps in the next section).
+
+**Framework Step 1 — Asset Allocation (the structural foundation).** To keep
+portfolio overlap under 10%, don't pick funds from the same category or
+identical investment styles. For a 3–4 fund, 10-year-horizon portfolio,
+structure core and satellite buckets first:
+- **Fund 1 (Core Anchor)** — Flexi Cap or Large & Mid Cap: stability and steady compounding.
+- **Fund 2 (Growth Satellite)** — Mid Cap: alpha generation.
+- **Fund 3 (Aggressive Satellite)** — Small Cap: long-term explosive growth.
+- **Fund 4 (Hedge/Diversifier)** — Value, Multi-Asset, or International Index: low correlation to the broader Indian growth market.
+
+**Framework Step 2 — the quantitative filter (risk & alpha).** Screen the
+direct-fund universe on:
+- **Alpha** — positive against *both* the benchmark index and the category
+  average, proving stock-picking skill rather than a bull-market ride:
+  $\alpha = R_p - [R_f + \beta (R_m - R_f)]$
+- **Sharpe Ratio** — reward per unit of volatility, ideally top-quartile of category: $S = \frac{R_p - R_f}{\sigma_p}$
+- **Sortino Ratio** — like Sharpe but penalizes only downside volatility; often the more decision-relevant of the two for capital protection.
+- **Beta** — core funds should fall less than the market in a crash
+  (β meaningfully below 1); satellites may run hotter (β up to ~1.15) *only*
+  if alpha is exceptional enough to compensate for the added volatility.
+
+**Framework Step 3 — the overlap test (true diversification).** Run the
+shortlist through a portfolio overlap tool. The problem: a Flexi Cap and a
+Large Cap fund may both hold HDFC Bank and Reliance — two expense ratios for
+the same bet. The rule: compare every pair; reject any pair sharing more than
+10% of its underlying holdings. Pro-tip: different AMCs and contrasting
+styles (pairing a "Growth" house with a "Value" house) naturally reduce overlap.
+
+**Framework Step 4 — the repeatability & authenticity check.** To keep
+confidence consistent run over run: use **rolling** 3-year/5-year returns
+(never point-to-point "1-year" figures) — a fund should beat its benchmark on
+a rolling basis more than 70% of the time, which removes market-timing luck.
+Also check **manager consistency**: alpha belongs to the manager, not the
+AMC, so a fund needs the current manager to have been at the helm 3–5+ years;
+a manager departure means re-evaluating the fund from scratch.
+
+> **Reconciliation — where the built engine intentionally diverges.** The
+> deterministic engine ([selection/mf_recommend.py](selection/mf_recommend.py),
+> knowledge base below) implements Steps 1 and 3 essentially as written
+> (buckets, ≤10% overlap, one fund per AMC). Step 2 is implemented with
+> **relative, category-aware gates** instead of the fixed absolute bars above
+> (alpha excess *vs category* > 0 rather than alpha > 2.0 absolute; Sharpe
+> *vs category* plus a risk-free floor rather than a flat 1.5) — Morningstar's
+> published tables make peer-relative comparison the more honest signal than
+> a hardcoded threshold that drifts with market regime. **Sortino Ratio and
+> manager-tenure are not implemented**: Morningstar's public pages don't
+> publish either, and the engine never fabricates a metric it can't source
+> (see "Data dictionary" below). Rolling-return consistency (Step 4) exists
+> only in the separate NAV-based `selection/mf_select.py`, not in the
+> Morningstar-snapshot engine — a candidate for a future version (see
+> "Version history / future hooks").
 
 ## End-to-end runbook (plain Python — no Claude required)
 
@@ -9,11 +66,11 @@ that run these exact same commands — in production you can run everything
 below directly and pay zero model tokens.
 
 ```bash
-# STEP 0 — one-time setup (idempotent)
+# STAGE 0 — one-time setup (idempotent)
 ./setup.sh && source .venv/bin/activate
 python -m pytest tests/ -q                        # all suites must pass
 
-# STEP 1 — SCRAPE (one canonical script, three modes; list + enrichment in one run)
+# STAGE 1 — SCRAPE (one canonical script, three modes; list + enrichment in one run)
 # (a) one fund house (full report: list + every fund enriched):
 python scraper/morningstar_fund_details.py --out ms_data --headless --workers 4 \
     --house "HDFC Asset Management Company Limited"
@@ -28,22 +85,25 @@ python scraper/morningstar_fund_details.py --out ms_data --headless --workers 8 
 # enrichment per house (testing aid). Re-runs refresh list data but PRESERVE
 # previously enriched funds.
 
-# STEP 2 — RECOMMENDATION ENGINE (no browser, no network; deterministic)
+# STAGE 2 — RECOMMENDATION ENGINE (no browser, no network; deterministic)
 python selection/mf_recommend.py --selftest       # must print SELFTEST PASS
 python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
 # -> recommendations.json (scores, gates, reasons, run_hash) + recommendations.md
 ```
 
-Order matters: 1 → 2. The engine only sees funds the scraper enriched (it
-needs the risk tables); re-run Step 2 alone any time to re-score the same
-snapshot — identical run_hash proves nothing drifted.
+Order matters: Stage 1 → Stage 2. The engine only sees funds the scraper
+enriched (it needs the risk tables); re-run Stage 2 alone any time to
+re-score the same snapshot — identical run_hash proves nothing drifted.
+(These pipeline "Stages" are unrelated to the "Framework Steps" 1–4 above —
+Framework Steps describe the *investment logic*; Stages describe *when to run
+which command*.)
 
 ### Claude skills ↔ python scripts mapping
 
 | Claude skill (optional) | Runs exactly | When to prefer which |
 |---|---|---|
-| `/morningstar-scrape` | Step 1 above | skill: Claude supervises, validates output, retries failures; script: zero token cost, cron-able |
-| `/mf-recommend` | Step 2 above + writes `model_judgment.md` | skill adds the model-judgment layer (interpretation, conviction, flags); script alone gives you everything deterministic |
+| `/morningstar-scrape` | Stage 1 above | skill: Claude supervises, validates output, retries failures; script: zero token cost, cron-able |
+| `/mf-recommend` | Stage 2 above + writes `model_judgment.md` | skill adds the model-judgment layer (interpretation, conviction, flags); script alone gives you everything deterministic |
 
 **Production guidance:** once stable, schedule the three python steps directly
 (cron/CI) — no Claude in the loop, no token spend. The single capability that
@@ -54,8 +114,8 @@ when you want the interpretive layer refreshed.
 ## Data acquisition: the single canonical scraper
 
 `scraper/morningstar_fund_details.py` is the ONE scraping script — fund list +
-per-fund detail enrichment consolidated. It feeds the Quantitative Filter
-(Step 2) with everything scraped from
+per-fund detail enrichment consolidated. It feeds Framework Step 2 (the
+Quantitative Filter) with everything scraped from
 [morningstar.in](https://www.morningstar.in/default.aspx).
 
 ### Design architecture — three layers
@@ -136,7 +196,7 @@ python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
 
 | Attribute (per fund JSON) | Used for | Why |
 |---|---|---|
-| `Category` | bucket mapping (core/growth/aggressive/diversifier) | Step 1 asset allocation: structural diversification precedes any fund merit |
+| `Category` | bucket mapping (core/growth/aggressive/diversifier) | Framework Step 1 asset allocation: structural diversification precedes any fund merit |
 | fund name | Direct+Growth plan filter | Regular/IDCW variants duplicate the same portfolio with worse economics for a self-directed long-horizon investor |
 | `Latest NAV` / `NAV Date` | staleness note | a fund priced older than the snapshot max may carry stale metrics; flagged, never silently dropped |
 | `risk_ratings.*.Alpha` (Inv, Cat) | gate + score + stability | manager skill is *excess* over category, not raw return; positive alpha vs peers is the entry ticket |
@@ -147,7 +207,7 @@ python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
 | `capture_ratios.Upside/Downside` (Inv, Cat) | best/worst-market behaviour: spread scored; downside capped absolutely (≤ 110) AND vs category (≤ 1.05×) | up/down capture is the cleanest scraped proxy for behaviour in best and worst market scenarios; the double cap keeps downside risk to a minimum both in absolute terms and relative to peers |
 | `drawdown.Maximum` (Inv %, Cat %) | gate (≤ 1.10× category) + edge score | max drawdown is the realized worst case; a fund that falls much deeper than its own category adds risk the category label hides |
 | `drawdown_dates.Max Duration` | recovery-speed score | two funds with equal −12% drawdowns are not equal if one took 5 months to recover and the other 2 years; time-under-water is the real cost of a crash to a goal-dated investor |
-| `holdings.Equity[].% Portfolio Weight` | pairwise overlap between picks (≤ 10%) | Step 3: paying two expense ratios for the same stocks is diversification theatre |
+| `holdings.Equity[].% Portfolio Weight` | pairwise overlap between picks (≤ 10%) | Framework Step 3: paying two expense ratios for the same stocks is diversification theatre |
 | `holdings.Equity[].Equity Star Rating` | weight-averaged portfolio quality score | rates what the manager *owns right now*, complementing the return-based metrics which only rate what they owned in the past |
 | `holdings.Equity[].Sector` | effective sector count (inverse-HHI), reported | intra-fund concentration context; cross-fund diversification is already enforced by category quotas |
 | `holdings.Equity[].Share Change %` | captured (direction-signed) | churn signal; summarised better by Reported Turnover %, so not double-counted in scoring |
@@ -202,7 +262,7 @@ scale-free and robust to outliers; `None` ranks 0 — missing data never helps.
 ### Selection
 
 Two passes (v1.2). **Structure first:** buckets are seated in
-`bucket_priority` order (core → growth → aggressive → diversifier — README
+`bucket_priority` order (core → growth → aggressive → diversifier — Framework
 Step 1: the portfolio's shape precedes raw score), best-scored eligible fund
 per bucket, so a high-scoring satellite can no longer consume a shared
 constraint (like the one-per-AMC slot) that the core anchor needed. **Fill
