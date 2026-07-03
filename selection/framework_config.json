@@ -1,0 +1,64 @@
+{
+  "framework_version": "1.0.0",
+  "as_of": null,
+  "risk_free_rate": 0.065,
+  "universe": {
+    "plan": "Direct",
+    "option": "Growth",
+    "allowed_categories": [
+      "Equity Scheme - Large Cap Fund",
+      "Equity Scheme - Large & Mid Cap Fund",
+      "Equity Scheme - Flexi Cap Fund",
+      "Equity Scheme - Mid Cap Fund",
+      "Equity Scheme - Small Cap Fund",
+      "Equity Scheme - Focused Fund",
+      "Equity Scheme - Value Fund"
+    ],
+    "min_history_years": 7,
+    "min_aum_cr": null
+  },
+  "gates": {
+    "rolling3y_pct_positive_min": 90.0,
+    "rolling5y_worst_min": 0.0,
+    "alpha_vs_category_3y_min": 0.0,
+    "alpha_vs_category_5y_min": 0.0,
+    "alpha_vs_index_3y_min": 0.0,
+    "alpha_vs_index_5y_min": 0.0,
+    "downside_capture_max": 1.0,
+    "max_drawdown_vs_category_tolerance": 1.1
+  },
+  "scoring": {
+    "weights": {
+      "rolling5y_median_alpha_vs_category": 25,
+      "information_ratio_3y": 20,
+      "sortino_5y": 15,
+      "downside_capture_inv": 15,
+      "max_drawdown_inv": 10,
+      "upside_capture": 10,
+      "consistency_pct_3y_windows_beating_category": 5
+    },
+    "capture_months": 36
+  },
+  "selection": {
+    "target_count": 4,
+    "max_pairwise_overlap_pct": 10.0,
+    "max_funds_per_amc": 1,
+    "max_funds_per_category": 1,
+    "require_holdings_for_overlap": false
+  },
+  "tie_break_order": [
+    "score",
+    "rolling5y_median",
+    "sortino_5y",
+    "scheme_code_asc"
+  ],
+  "benchmark_map": {
+    "Equity Scheme - Large Cap Fund": "NIFTY100_TRI",
+    "Equity Scheme - Large & Mid Cap Fund": "NIFTY_LARGEMID250_TRI",
+    "Equity Scheme - Flexi Cap Fund": "NIFTY500_TRI",
+    "Equity Scheme - Mid Cap Fund": "NIFTY_MIDCAP150_TRI",
+    "Equity Scheme - Small Cap Fund": "NIFTY_SMALLCAP250_TRI",
+    "Equity Scheme - Focused Fund": "NIFTY500_TRI",
+    "Equity Scheme - Value Fund": "NIFTY500_TRI"
+  }
+}
