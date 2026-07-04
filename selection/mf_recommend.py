@@ -498,6 +498,7 @@ class RecommendationEngine:
                 "turnover_pct": num(summary.get("Reported Turnover %")),
                 "total_holdings": num(summary.get("Total Holdings")),
                 "nav_date": nav_date,
+                "enriched_at": raw.get("enriched_at"),
                 **{k: (m or {}).get(k) for k in (
                     "alpha", "alpha_cat", "alpha_excess", "beta", "sharpe",
                     "sharpe_cat", "sharpe_excess", "std", "std_cat", "std_edge",
@@ -755,12 +756,85 @@ def write_report(rep, out_dir):
     return jpath
 
 
+# Decision-relevant metrics tracked in metrics_history.jsonl. Deliberately
+# excludes raw holdings rows / risk-table blobs (those live only as CURRENT
+# state in ms_data/<House>.json) — history tracks the derived numbers that
+# drive gates/score, so each row stays tiny even after years of runs.
+HISTORY_METRIC_FIELDS = (
+    "horizon_used", "alpha", "alpha_cat", "alpha_excess", "worst_alpha_excess",
+    "alpha_consistency", "alpha_horizons", "sharpe", "sharpe_cat",
+    "sharpe_excess", "beta", "downside_capture", "downside_capture_cat",
+    "capture_spread", "max_drawdown", "max_drawdown_cat",
+    "drawdown_duration_months", "top10_pct", "turnover_pct",
+    "portfolio_quality", "r_squared",
+)
+
+
+def append_metrics_history(engine, path):
+    """Append one jsonl row per UNIVERSE fund (gate survivors AND excluded
+    funds alike — the interesting long-term question is often "this fund used
+    to pass gates, now it doesn't") to `path`, deduped per fund against the
+    LAST row already recorded there.
+
+    Dedup key: the fund's `enriched_at` timestamp from the scrape — NOT
+    wall-clock time. So re-running the engine any number of times against an
+    unchanged ms_data snapshot appends nothing (enriched_at hasn't moved);
+    re-scraping a single house next month appends exactly that house's funds.
+    Pure with respect to `engine` + the existing file: same inputs, same rows
+    appended, every time. Returns the number of rows appended.
+    """
+    last_seen = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                name = row.get("fund")
+                if name:
+                    last_seen[name] = row.get("enriched_at")
+
+    rows = []
+    for fund in engine.universe:
+        name = fund["name"]
+        m = engine.metrics.get(name, {})
+        enriched_at = m.get("enriched_at")
+        if enriched_at is not None and last_seen.get(name) == enriched_at:
+            continue                          # unchanged since last recorded snapshot
+        gate = engine.gate_results.get(name, {})
+        row = {
+            "fund": name,
+            "fund_house": fund["house"],
+            "category": fund["category"],
+            "bucket": fund["bucket"],
+            "enriched_at": enriched_at,
+            "score": engine.scores.get(name),         # None if gate-failed
+            "gates_passed": gate.get("passed"),
+            "failed_checks": sorted(
+                k for k, ok in gate.get("checks", {}).items() if not ok),
+            **{k: m.get(k) for k in HISTORY_METRIC_FIELDS},
+        }
+        rows.append(row)
+
+    if not rows:
+        return 0
+    with open(path, "a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
 # ----------------------------------------------------------------------------
 # Selftest: synthetic enriched snapshot, no browser, no RNG
 # ----------------------------------------------------------------------------
 
 def _synthetic_fund(category, alpha, alpha_cat, sharpe, sharpe_cat, beta,
-                    up, dn, dn_cat, mdd, mdd_cat, holdings, turnover="45.00"):
+                    up, dn, dn_cat, mdd, mdd_cat, holdings, turnover="45.00",
+                    enriched_at="2026-07-01T00:00:00+00:00"):
     def rv():
         return {"Alpha": {"Investment": str(alpha), "Category": str(alpha_cat), "Index": "–"},
                 "Beta": {"Investment": str(beta), "Category": "1.00", "Index": "–"},
@@ -781,6 +855,7 @@ def _synthetic_fund(category, alpha, alpha_cat, sharpe, sharpe_cat, beta,
     return {
         "Action": "Factsheet", "Category": category,
         "Latest NAV": "100.0", "NAV Date": "Jul 02, 2026",
+        "enriched_at": enriched_at,
         "risk_ratings": {"3Y": year(), "5Y": year(), "10Y": year()},
         "detailed_portfolio": {
             "holdings_summary": {"Equity Holdings": str(len(holdings)),
@@ -892,6 +967,35 @@ def selftest():
         rep4 = RecommendationEngine(tmp, cfg3).run()
         assert rep4["horizon_preference"][0] == "3Y"
 
+        # metrics_history.jsonl: dedup by enriched_at, not wall-clock re-runs
+        history_path = os.path.join(tmp, "metrics_history.jsonl")
+        engine_a = RecommendationEngine(tmp, cfg)
+        engine_a.run()
+        added1 = append_metrics_history(engine_a, history_path)
+        assert added1 == engine_a.universe.__len__(), \
+            "first history write should cover the whole universe"
+        engine_b = RecommendationEngine(tmp, cfg)   # identical snapshot, re-run
+        engine_b.run()
+        added2 = append_metrics_history(engine_b, history_path)
+        assert added2 == 0, "unchanged enriched_at must not duplicate history rows"
+        with open(history_path, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        assert len(rows) == added1, "history file should have exactly one batch"
+        assert all("score" in r and "gates_passed" in r for r in rows)
+        assert any(r["fund"] == "Weak Laggard Fund Direct Growth"
+                  and r["gates_passed"] is False for r in rows), \
+            "excluded funds must still be tracked in history"
+        # simulate a re-scrape of one fund: only ITS row should append
+        houses["AMC_Beta"]["Weak Laggard Fund Direct Growth"] = _synthetic_fund(
+            "Mid-Cap", 0.5, 1.5, 0.5, 0.7, 1.00, 98, 104, 100, -20.0, -17.0,
+            {"Stock F": 100.0}, enriched_at="2026-08-01T00:00:00+00:00")
+        with open(os.path.join(tmp, "AMC_Beta.json"), "w", encoding="utf-8") as f:
+            json.dump(houses["AMC_Beta"], f)
+        engine_c = RecommendationEngine(tmp, cfg)
+        engine_c.run()
+        added3 = append_metrics_history(engine_c, history_path)
+        assert added3 == 1, f"expected exactly 1 re-scraped fund, got {added3}"
+
         print("SELFTEST PASS")
         print(f"  universe={rep1['universe_size']} gates_passed={rep1['gates_passed']}")
         print(f"  picks={picks}")
@@ -912,6 +1016,8 @@ def main():
                     help="dir of enriched per-house JSON files")
     ap.add_argument("--config", help="JSON overrides merged onto DEFAULT_CONFIG")
     ap.add_argument("--out", default="ms_data/recommendation_run")
+    ap.add_argument("--no-history", action="store_true",
+                    help="skip appending to <data>/metrics_history.jsonl")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -931,7 +1037,8 @@ def main():
                     base[k] = v
         merge(cfg, user_cfg)
 
-    rep = RecommendationEngine(args.data, cfg).run()
+    engine = RecommendationEngine(args.data, cfg)
+    rep = engine.run()
     jpath = write_report(rep, args.out)
     print(f"universe={rep['universe_size']} gates_passed={rep['gates_passed']} "
           f"recommended={len(rep['recommendations'])}")
@@ -939,6 +1046,11 @@ def main():
         print(f"  {r['rank']}. {r['fund']} (score {r['score']}, {r['bucket']})")
     print(f"run_hash={rep['run_hash']}")
     print(f"report -> {jpath}")
+
+    if not args.no_history:
+        history_path = os.path.join(args.data, "metrics_history.jsonl")
+        added = append_metrics_history(engine, history_path)
+        print(f"history: +{added} row(s) -> {history_path}")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ The selftest builds a synthetic enriched snapshot and asserts:
 Run: python -m pytest tests/test_mf_recommend.py -v
 """
 
+import json
 import os
 import sys
 
@@ -137,3 +138,57 @@ def test_reason_contains_driving_numbers():
                   "recovered from max drawdown in 5 months",
                   "avg star 3.4", "top-10 = 40% of assets", "turnover 45%"):
         assert token in reason, f"missing {token!r} in reason"
+
+
+# ---------------------------------------------------------------------------
+# append_metrics_history — dedup by enriched_at, never by wall-clock re-run
+# ---------------------------------------------------------------------------
+def _build_engine(tmp_path, enriched_at="2026-07-01T00:00:00+00:00"):
+    fund = mf_recommend._synthetic_fund(
+        "Flexi Cap", 2.5, 1.0, 0.9, 0.6, 0.90, 105, 90, 100, -10.0, -13.0,
+        {"Stock A": 60.0, "Stock B": 40.0}, enriched_at=enriched_at)
+    (tmp_path / "AMC_X.json").write_text(json.dumps(
+        {"Solo Fund Direct Growth": fund}))
+    cfg = json.loads(json.dumps(mf_recommend.DEFAULT_CONFIG))
+    engine = mf_recommend.RecommendationEngine(str(tmp_path), cfg)
+    engine.run()
+    return engine
+
+
+def test_append_metrics_history_first_write(tmp_path):
+    engine = _build_engine(tmp_path)
+    hpath = tmp_path / "metrics_history.jsonl"
+    added = mf_recommend.append_metrics_history(engine, str(hpath))
+    assert added == 1
+    lines = hpath.read_text().strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["fund"] == "Solo Fund Direct Growth"
+    assert row["enriched_at"] == "2026-07-01T00:00:00+00:00"
+    assert "score" in row and "gates_passed" in row
+    assert "alpha_excess" in row
+    # raw holdings/risk blobs must NOT leak into history rows
+    assert "holdings" not in row and "risk_ratings" not in row
+
+
+def test_append_metrics_history_dedupes_unchanged_enriched_at(tmp_path):
+    engine1 = _build_engine(tmp_path)
+    hpath = tmp_path / "metrics_history.jsonl"
+    mf_recommend.append_metrics_history(engine1, str(hpath))
+    engine2 = _build_engine(tmp_path)          # same enriched_at, re-run
+    added = mf_recommend.append_metrics_history(engine2, str(hpath))
+    assert added == 0
+    assert len(hpath.read_text().strip().splitlines()) == 1
+
+
+def test_append_metrics_history_appends_on_new_enriched_at(tmp_path):
+    engine1 = _build_engine(tmp_path, enriched_at="2026-07-01T00:00:00+00:00")
+    hpath = tmp_path / "metrics_history.jsonl"
+    mf_recommend.append_metrics_history(engine1, str(hpath))
+    engine2 = _build_engine(tmp_path, enriched_at="2026-08-01T00:00:00+00:00")
+    added = mf_recommend.append_metrics_history(engine2, str(hpath))
+    assert added == 1
+    lines = hpath.read_text().strip().splitlines()
+    assert len(lines) == 2
+    dates = {json.loads(l)["enriched_at"] for l in lines}
+    assert dates == {"2026-07-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00"}

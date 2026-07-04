@@ -93,6 +93,41 @@ def test_safe_house_name_matches_file_convention():
     assert fd.safe_house_name("PPFAS Asset Management Pvt. Ltd") == "PPFAS_Asset_Management_Pvt_Ltd"
 
 
+def test_is_direct_growth_plan_filter():
+    ok = fd.is_direct_growth
+    assert ok("Axis Bluechip Fund Direct Plan Growth")
+    assert ok("Parag Parikh Flexi Cap Direct Growth")
+    assert not ok("Axis Bluechip Fund Regular Growth")          # Regular
+    assert not ok("Axis X Fund Direct IDCW")                    # IDCW
+    assert not ok("Axis X Fund Direct Payout Inc Dist cum Cap Wdrl")
+    assert not ok("Axis X Fund Direct Reinvestment Inc Dist cum Cap Wdrl")
+    assert not ok("Axis X Fund Growth")                         # no Direct
+    assert not ok(None)
+
+
+def test_is_recently_enriched_uses_injected_now():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    fresh = fd.is_recently_enriched("2026-07-15T00:00:00+00:00", 30, now=now)
+    stale = fd.is_recently_enriched("2026-06-01T00:00:00+00:00", 30, now=now)
+    assert fresh is True
+    assert stale is False
+
+
+def test_is_recently_enriched_never_disabled_or_missing():
+    assert fd.is_recently_enriched(None, 30) is False              # never enriched
+    assert fd.is_recently_enriched("2026-07-15T00:00:00+00:00", 0) is False  # feature off
+    assert fd.is_recently_enriched("2026-07-15T00:00:00+00:00", None) is False
+    assert fd.is_recently_enriched("not-a-date", 30) is False       # malformed, never raises
+
+
+def test_is_recently_enriched_handles_naive_timestamps():
+    from datetime import datetime, timezone
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    # a naive ISO string (no offset) must not crash the tz-aware comparison
+    assert fd.is_recently_enriched("2026-07-15T00:00:00", 30, now=now) is True
+
+
 def test_merge_list_preserving_enrichment():
     existing = {
         "Fund A": {"Category": "Old Cat", "Latest NAV": "10",

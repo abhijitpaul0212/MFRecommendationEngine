@@ -82,8 +82,9 @@ from urllib.parse import urljoin
 BASE_URL = "https://www.morningstar.in/default.aspx"
 ACTION_DELAY = 2.0          # polite pause between interactions (seconds)
 POSTBACK_TIMEOUT = 30
-PAGE_LOAD_TIMEOUT = 60
+PAGE_LOAD_TIMEOUT = 90      # renderer stalls happen under parallel load
 MAX_PAGES_GUARD = 500       # hard stop against infinite pagination loops
+SESSION_RESTART_ATTEMPTS = 3  # browser (re)starts per worker before giving up
 SAL_WAIT_TIMEOUT = 45       # SAL widgets fetch data after page load
 SECONDS_PER_FUND_EST = 50   # for the runtime estimate printed before enrichment
 
@@ -311,6 +312,40 @@ def safe_house_name(house):
     return re.sub(r"[^A-Za-z0-9]+", "_", house).strip("_")
 
 
+# Plan-variant filter for --direct-growth-only: the recommendation engine only
+# consumes Direct+Growth funds (~1/4 of all variants), so enriching just those
+# cuts detail-page work ~75% without losing anything the engine can use.
+DIRECT_GROWTH_EXCLUDES = ("idcw", "inc dis", "payout", "reinvestment", "regular")
+
+
+def is_direct_growth(name):
+    low = (name or "").lower()
+    return ("direct" in low and "growth" in low
+            and not any(t in low for t in DIRECT_GROWTH_EXCLUDES))
+
+
+def is_recently_enriched(enriched_at, refresh_days, now=None):
+    """True if `enriched_at` (ISO 8601, as written by nest_fund_details) is
+    within `refresh_days` of `now`. Used by --refresh-days to skip re-scraping
+    a fund's detail pages when the site's risk/holdings tables (which update
+    ~monthly) are unlikely to have changed since the last enrichment — the
+    cheap LIST phase still refreshes NAV/date for every fund regardless.
+    None-safe: a never-enriched fund (no enriched_at) is never 'fresh', so it
+    is always scraped. `now` is injectable for deterministic testing; the
+    scraper itself always calls this with the real wall clock (this governs
+    what to re-scrape, not any hashed/deterministic output)."""
+    if not enriched_at or not refresh_days:
+        return False
+    try:
+        ts = datetime.fromisoformat(enriched_at)
+    except (ValueError, TypeError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - ts).days < refresh_days
+
+
 def merge_list_preserving_enrichment(existing, fresh):
     """New snapshot of the list REFRESHES list-level attrs but PRESERVES the
     enrichment already on disk for funds still present. Funds that left the
@@ -350,6 +385,13 @@ def make_driver(headless=True):
     opts.add_argument("--window-size=1600,1000")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--disable-gpu")            # fewer headless renderer stalls
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-extensions")
+    # Don't block on the full ad-laden page load: every read in this module
+    # already uses explicit element waits, so DOMContentLoaded is enough and
+    # avoids most "Timed out receiving message from renderer" errors.
+    opts.page_load_strategy = "eager"
     opts.add_experimental_option(
         "prefs", {"profile.default_content_setting_values.notifications": 2})
     d = S["webdriver"].Chrome(options=opts)
@@ -937,11 +979,32 @@ class MorningstarScraper:
     All shared-state merges are lock-protected with atomic file writes."""
 
     def __init__(self, out_dir, headless=True, delay=ACTION_DELAY,
-                 workers=1, max_pages=MAX_PAGES_GUARD, limit=None):
+                 workers=1, max_pages=MAX_PAGES_GUARD, limit=None,
+                 force_workers=False):
         self.out_dir = out_dir
         self.headless = headless
         self.delay = delay
-        self.workers = max(1, int(workers))
+        # Each worker is a full multi-process Chrome; too many starve the
+        # renderers ("Timed out receiving message from renderer") and total
+        # throughput FALLS while the site request rate climbs. Clamp to a
+        # machine-sustainable ceiling unless the user explicitly forces it.
+        hard_cap = max(2, min(8, (os.cpu_count() or 8) - 2))
+        requested = max(1, int(workers))
+        if force_workers:
+            self.workers = requested
+            if requested > hard_cap:
+                print(f"WARNING: --force-workers keeps {requested} workers "
+                      f"(machine-safe ceiling here is {hard_cap}). Expect "
+                      f"renderer timeouts, browser restarts, and a "
+                      f"{requested}x request rate against the site.",
+                      flush=True)
+        else:
+            self.workers = min(requested, hard_cap)
+            if self.workers < requested:
+                print(f"NOTE: --workers {requested} clamped to {self.workers} "
+                      f"(each worker is a full Chrome; more would starve "
+                      f"renderers on this machine — pass --force-workers to "
+                      f"override).", flush=True)
         self.max_pages = max_pages
         self.limit = limit
         self._lock = threading.Lock()
@@ -988,12 +1051,50 @@ class MorningstarScraper:
         return data, urls
 
     def _list_worker(self, worker_id, houses):
-        d = make_driver(self.headless)
+        """Owns one browser. NEVER raises: a failure — including the browser
+        itself refusing to (re)start — marks the affected house failed in the
+        manifest and moves on, so one stalled renderer can't kill the run."""
+        d = page = None
+
+        def fresh_session(old_driver):
+            """(Re)start the browser + land on the factsheet, with backoff.
+            Returns (driver, page) or (None, None); never raises."""
+            if old_driver is not None:
+                try:
+                    old_driver.quit()
+                except Exception:
+                    pass
+            for attempt in range(1, SESSION_RESTART_ATTEMPTS + 1):
+                drv = None
+                try:
+                    drv = make_driver(self.headless)
+                    pg = FactsheetPage(drv, self.delay)
+                    pg.open_factsheet()
+                    return drv, pg
+                except Exception as e:
+                    print(f"  [w{worker_id}] browser (re)start attempt "
+                          f"{attempt} failed: {e}", flush=True)
+                    if drv is not None:
+                        try:
+                            drv.quit()
+                        except Exception:
+                            pass
+                    time.sleep(5 * attempt)
+            return None, None
+
         try:
-            page = FactsheetPage(d, self.delay)
-            page.open_factsheet()
+            d, page = fresh_session(None)
             for house in houses:
-                last_err = None
+                if page is None:                    # try to heal before skipping
+                    d, page = fresh_session(d)
+                if page is None:
+                    with self._lock:
+                        self.failed_houses[house] = (
+                            "browser session could not be (re)started")
+                    print(f"  [w{worker_id}] SKIP '{house}': no browser session",
+                          flush=True)
+                    continue
+                last_err, fresh, urls = None, None, None
                 for attempt in (1, 2):
                     try:
                         fresh, urls = self.list_house(page, house)
@@ -1004,15 +1105,14 @@ class MorningstarScraper:
                         print(f"  [w{worker_id}] list '{house}' attempt "
                               f"{attempt} failed: {e}", flush=True)
                         try:
-                            page.open_factsheet()
+                            page.open_factsheet()       # soft reset
                         except Exception:
-                            d.quit()
-                            d = make_driver(self.headless)
-                            page = FactsheetPage(d, self.delay)
-                            page.open_factsheet()
-                if last_err is not None:
+                            d, page = fresh_session(d)  # hard reset; never raises
+                            if page is None:
+                                break
+                if last_err is not None or fresh is None:
                     with self._lock:
-                        self.failed_houses[house] = str(last_err)
+                        self.failed_houses[house] = str(last_err or "no data")
                     continue
                 path = self._house_path(house)
                 with self._lock:
@@ -1031,10 +1131,11 @@ class MorningstarScraper:
                 print(f"  [list] {house}: {len(merged)} funds "
                       f"({kept} previously enriched preserved)", flush=True)
         finally:
-            try:
-                d.quit()
-            except Exception:
-                pass
+            if d is not None:
+                try:
+                    d.quit()
+                except Exception:
+                    pass
 
     # ---------------- enrich phase ----------------
     def enrich_fund(self, dp, href):
@@ -1046,10 +1147,37 @@ class MorningstarScraper:
         return portfolio, risk
 
     def _enrich_worker(self, worker_id, tasks):
-        d = make_driver(self.headless)
+        """Owns one browser. NEVER raises: any failure is recorded per fund in
+        the manifest and the worker moves on to its next task."""
+        d = dp = None
+
+        def fresh_session(old_driver):
+            """(Re)start the browser, with backoff. Never raises."""
+            if old_driver is not None:
+                try:
+                    old_driver.quit()
+                except Exception:
+                    pass
+            for attempt in range(1, SESSION_RESTART_ATTEMPTS + 1):
+                try:
+                    drv = make_driver(self.headless)
+                    return drv, FundDetailPage(drv, self.delay)
+                except Exception as e:
+                    print(f"  [w{worker_id}] browser (re)start attempt "
+                          f"{attempt} failed: {e}", flush=True)
+                    time.sleep(5 * attempt)
+            return None, None
+
         try:
-            dp = FundDetailPage(d, self.delay)
+            d, dp = fresh_session(None)
             for house, name, href in tasks:
+                if dp is None:                      # try to heal before skipping
+                    d, dp = fresh_session(d)
+                if dp is None:
+                    with self._lock:
+                        self.fund_failures.setdefault(house, {})[name] = (
+                            "browser session could not be (re)started")
+                    continue
                 last_err = None
                 for attempt in (1, 2):
                     try:
@@ -1060,15 +1188,13 @@ class MorningstarScraper:
                         last_err = e
                         print(f"  [w{worker_id}] enrich '{name}' attempt "
                               f"{attempt} failed: {e}", flush=True)
-                        try:
-                            d.quit()
-                        except Exception:
-                            pass
-                        d = make_driver(self.headless)
-                        dp = FundDetailPage(d, self.delay)
-                if last_err is not None:
+                        d, dp = fresh_session(d)    # hard reset; never raises
+                        if dp is None:
+                            break
+                if last_err is not None or dp is None:
                     with self._lock:
-                        self.fund_failures.setdefault(house, {})[name] = str(last_err)
+                        self.fund_failures.setdefault(house, {})[name] = str(
+                            last_err or "browser session lost")
                     continue
                 with self._lock:
                     self.house_data[house][name] = nest_fund_details(
@@ -1083,10 +1209,11 @@ class MorningstarScraper:
                       f"{len(bd) if isinstance(bd, list) else 'ERR'} "
                       f"risk={sorted(risk)}", flush=True)
         finally:
-            try:
-                d.quit()
-            except Exception:
-                pass
+            if d is not None:
+                try:
+                    d.quit()
+                except Exception:
+                    pass
 
     # ---------------- manifest ----------------
     def write_manifest(self):
@@ -1116,7 +1243,8 @@ class MorningstarScraper:
         return manifest
 
     # ---------------- run ----------------
-    def run(self, houses=None, funds=None, enrich=True):
+    def run(self, houses=None, funds=None, enrich=True, direct_growth_only=False,
+            refresh_days=None):
         os.makedirs(self.out_dir, exist_ok=True)
 
         all_houses = self.discover_houses()
@@ -1140,7 +1268,11 @@ class MorningstarScraper:
             futs = [pool.submit(self._list_worker, i, b)
                     for i, b in enumerate(buckets) if b]
             for f in as_completed(futs):
-                f.result()
+                try:
+                    f.result()
+                except Exception as e:   # workers shouldn't raise; last-resort shield
+                    print(f"  LIST worker crashed (others continue): {e}",
+                          flush=True)
         self.write_manifest()
 
         if not enrich:
@@ -1148,11 +1280,21 @@ class MorningstarScraper:
 
         # Phase B: enrichment tasks round-robin across workers
         tasks, no_url = [], []
+        skipped_plan = skipped_fresh = 0
         fund_filter = {f for f in (funds or [])}
         for house in sorted(self.house_data):
             names = sorted(self.house_data[house])
             if fund_filter:
                 names = [x for x in names if x in fund_filter]
+            if direct_growth_only:
+                before = len(names)
+                names = [x for x in names if is_direct_growth(x)]
+                skipped_plan += before - len(names)
+            if refresh_days:
+                before = len(names)
+                names = [x for x in names if not is_recently_enriched(
+                    self.house_data[house][x].get("enriched_at"), refresh_days)]
+                skipped_fresh += before - len(names)
             if self.limit:
                 names = names[: self.limit]
             for name in names:
@@ -1168,6 +1310,14 @@ class MorningstarScraper:
         if no_url:
             print(f"  {len(no_url)} fund(s) had no detail URL and were skipped",
                   flush=True)
+        if skipped_plan:
+            print(f"  --direct-growth-only: skipping {skipped_plan} non-Direct/"
+                  f"Growth plan variants (list data still captured for all)",
+                  flush=True)
+        if skipped_fresh:
+            print(f"  --refresh-days {refresh_days}: skipping {skipped_fresh} "
+                  f"fund(s) already enriched within the last {refresh_days} "
+                  f"days", flush=True)
         est_min = len(tasks) * SECONDS_PER_FUND_EST / max(1, self.workers) / 60
         print(f"ENRICH phase: {len(tasks)} fund(s) across {self.workers} "
               f"browser(s) (~{est_min:.0f} min estimated)...", flush=True)
@@ -1177,7 +1327,11 @@ class MorningstarScraper:
             futs = [pool.submit(self._enrich_worker, i, b)
                     for i, b in enumerate(buckets) if b]
             for f in as_completed(futs):
-                f.result()
+                try:
+                    f.result()
+                except Exception as e:   # workers shouldn't raise; last-resort shield
+                    print(f"  ENRICH worker crashed (others continue): {e}",
+                          flush=True)
 
         manifest = self.write_manifest()
         print(f"done: {manifest['total_schemes']} schemes, "
@@ -1207,8 +1361,21 @@ def main():
                          "--house (exact name; repeatable)")
     ap.add_argument("--out", default="ms_data")
     ap.add_argument("--workers", type=int, default=4,
-                    help="parallel browser instances (default 4). Higher = "
-                         "faster but N× the request rate; be polite.")
+                    help="parallel browser instances (default 4; clamped to a "
+                         "machine-safe ceiling unless --force-workers). Higher "
+                         "= N× the site request rate; be polite.")
+    ap.add_argument("--force-workers", action="store_true",
+                    help="bypass the machine-safe worker ceiling (expect "
+                         "renderer timeouts and heavier site load)")
+    ap.add_argument("--direct-growth-only", action="store_true",
+                    help="enrich only Direct+Growth plan variants — the ones "
+                         "the recommendation engine uses (~75%% less work); "
+                         "list-level data is still captured for every fund")
+    ap.add_argument("--refresh-days", type=int, default=None,
+                    help="skip re-enriching a fund if it was already enriched "
+                         "within this many days (Morningstar's risk/holdings "
+                         "tables update ~monthly; NAV is refreshed regardless "
+                         "by the cheap list phase). Default: always re-enrich.")
     ap.add_argument("--limit", type=int, default=None,
                     help="cap enriched funds per house (testing aid)")
     ap.add_argument("--headless", action="store_true")
@@ -1220,8 +1387,11 @@ def main():
 
     scraper = MorningstarScraper(args.out, headless=args.headless,
                                  delay=max(args.delay, 1.0),
-                                 workers=args.workers, limit=args.limit)
-    scraper.run(houses=args.house, funds=args.fund)
+                                 workers=args.workers, limit=args.limit,
+                                 force_workers=args.force_workers)
+    scraper.run(houses=args.house, funds=args.fund,
+                direct_growth_only=args.direct_growth_only,
+                refresh_days=args.refresh_days)
 
 
 if __name__ == "__main__":

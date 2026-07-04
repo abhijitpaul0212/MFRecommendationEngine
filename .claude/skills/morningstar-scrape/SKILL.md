@@ -57,9 +57,15 @@ python scraper/morningstar_fund_details.py --out ms_data --headless --workers 4 
 python scraper/morningstar_fund_details.py --out ms_data --headless \
     --house "<exact house name>" --fund "<exact fund name>"
 
-# MODE 3 — full universe (~47 houses, ~14k funds; the script prints an
-#          enrichment-time estimate — expect HOURS even with 8 workers)
-python scraper/morningstar_fund_details.py --out ms_data --headless --workers 8 --all
+# MODE 3 — full universe (~47 houses; prefer --direct-growth-only, which
+#          enriches only the ~3.5k plan variants the recommendation engine
+#          uses instead of all ~14k — ~75% less work, still HOURS on a
+#          first-ever run). Add --refresh-days N on ROUTINE re-runs once a
+#          baseline snapshot exists — skips funds enriched within N days
+#          (Morningstar's risk/holdings tables update ~monthly), turning
+#          repeat runs into a minutes-not-hours refresh:
+python scraper/morningstar_fund_details.py --out ms_data --headless --workers 6 \
+    --all --direct-growth-only --refresh-days 30
 
 # unit tests (no browser needed)
 python -m pytest tests/test_morningstar_parse.py tests/test_fund_details_parse.py -v
@@ -71,6 +77,15 @@ errors out; an unknown fund name is reported as SKIPPED). `--limit N` caps
 enrichment per house for testing. Keep delays at defaults (be polite to the
 site); prefer background execution for long runs. Re-runs are safe: list-level
 attributes refresh, previously enriched funds are preserved.
+
+Resilience notes: `--workers` is clamped to a machine-safe ceiling (each
+worker is a full Chrome; too many starve renderers and cause "Timed out
+receiving message from renderer" — `--force-workers` overrides at your own
+risk, do not suggest it by default). Workers self-heal: a browser crash or
+renderer stall restarts the session with backoff, and anything that still
+fails is recorded per house/fund in the manifest (`failed_fund_houses`,
+`fund_failures`) instead of aborting the run — check those after long runs
+and re-run the same command to fill gaps.
 
 ## Expected output (validate before declaring success)
 

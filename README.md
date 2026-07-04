@@ -78,17 +78,29 @@ python scraper/morningstar_fund_details.py --out ms_data --headless --workers 4 
 python scraper/morningstar_fund_details.py --out ms_data --headless \
     --house "Axis Asset Management Company Limited" \
     --fund "Axis Bluechip Fund Direct Plan Growth"
-# (c) the FULL UNIVERSE (~47 houses, ~14k funds — hours even parallelised;
+# (c) the FULL UNIVERSE (~47 houses; --direct-growth-only enriches just the
+#     ~3.5k plan variants the engine uses instead of all ~14k — ~75% faster;
 #     the script prints an estimate before enriching):
-python scraper/morningstar_fund_details.py --out ms_data --headless --workers 8 --all
+python scraper/morningstar_fund_details.py --out ms_data --headless --workers 6 \
+    --all --direct-growth-only
+# Workers are clamped to a machine-safe ceiling (each is a full Chrome; too
+# many starve renderers -> "Timed out receiving message from renderer").
+# --force-workers bypasses the clamp at your own risk.
 # House/fund names must match ms_data/filters.json EXACTLY. --limit N caps
 # enrichment per house (testing aid). Re-runs refresh list data but PRESERVE
 # previously enriched funds.
+# --refresh-days 30: skip re-enriching funds scraped within the last 30 days
+# (Morningstar's risk/holdings tables update ~monthly; cuts routine refresh
+# runs from hours to minutes). Add it once you have a full baseline snapshot:
+python scraper/morningstar_fund_details.py --out ms_data --headless --workers 6 \
+    --all --direct-growth-only --refresh-days 30
 
 # STAGE 2 — RECOMMENDATION ENGINE (no browser, no network; deterministic)
 python selection/mf_recommend.py --selftest       # must print SELFTEST PASS
 python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
 # -> recommendations.json (scores, gates, reasons, run_hash) + recommendations.md
+# -> ms_data/metrics_history.jsonl (one row per fund per run, appended and
+#    deduped by enriched_at — see "Longitudinal history" below; --no-history skips it)
 ```
 
 Order matters: Stage 1 → Stage 2. The engine only sees funds the scraper
@@ -166,6 +178,33 @@ every completed fund, and per-house/per-fund failures are retried once then
 recorded in the manifest (never silently dropped). **Re-runs refresh
 list-level attributes but preserve previously enriched funds** (delisted funds
 are dropped so the file mirrors the current snapshot).
+
+**Worker ceiling.** Each worker is a full multi-process Chrome; too many on
+one machine starve renderers (`Timed out receiving message from renderer`)
+and total throughput *falls* while the site's request rate climbs — more
+workers past that point makes the run slower and ruder, not faster.
+`--workers` is therefore clamped to `max(2, min(8, cpu_count - 2))` unless
+`--force-workers` overrides it. Workers also self-heal: a browser crash or
+renderer stall triggers a session restart with backoff (`SESSION_RESTART_ATTEMPTS`);
+anything still unrecoverable is recorded per house/fund in the manifest
+(`failed_fund_houses`, `fund_failures`) rather than aborting the whole run —
+re-running the same command fills the gaps (see the two re-run flags below).
+
+**`--direct-growth-only`** enriches only Direct+Growth plan variants — the
+only ones the recommendation engine ever consumes (~1/4 of all variants,
+since Regular/IDCW/Payout duplicates exist per scheme). List-level data
+(NAV, category) is still captured for every fund regardless; only the
+expensive per-fund detail-page enrichment is skipped for non-Direct-Growth
+variants. Cuts total enrichment work roughly 75%.
+
+**`--refresh-days N`** skips re-enriching a fund whose `enriched_at` is
+younger than N days. Rationale: Morningstar's risk/holdings tables update on
+roughly a monthly cadence, while NAV changes daily — and NAV is already
+refreshed by the (cheap) list phase on every run regardless of this flag. Re-
+scraping all detail pages on every run buys almost nothing beyond what the
+list phase already provides, at the full multi-hour cost. Without this flag
+(default), every run re-enriches everything — safe, but expensive. A fund
+that has never been enriched (no `enriched_at`) is always scraped.
 
 Outputs in `ms_data/`: `filters.json` (all dropdown values), one
 `<Fund_House>.json` per house (fund-name keys, same structure as always), and
@@ -281,6 +320,28 @@ excluded from `run_hash`); floats through `r6()` before comparison; every
 ordering ends in a fund-name tie-break; config and inputs hashed into the
 manifest so identical `(snapshot, config)` provably yields identical output.
 
+### Longitudinal history (`ms_data/metrics_history.jsonl`)
+
+Every engine run appends one JSON line per **universe fund** (gate survivors
+AND gate-excluded funds alike — "this fund used to pass, now it doesn't" is
+often the more interesting long-term signal) to `metrics_history.jsonl`,
+unless `--no-history` is passed. Each row carries the same decision-relevant
+metrics used for gates/scoring (`HISTORY_METRIC_FIELDS`) plus `score` and
+`gates_passed`/`failed_checks` — deliberately NOT the raw holdings rows or
+risk-table blobs, which live only as *current state* in the per-house JSON,
+so each row stays tiny (~300–500 bytes) no matter how long the file grows.
+
+**Dedup key: the fund's `enriched_at` timestamp from the scrape — never
+wall-clock.** Re-running the engine any number of times against an unchanged
+`ms_data` snapshot appends nothing (each fund's `enriched_at` hasn't moved);
+re-scraping one house next month appends exactly that house's funds on the
+next engine run. This makes the file a genuine longitudinal record —
+enabling future trend gates ("alpha excess declining N refreshes running")
+and backtesting whether past recommendations aged well — without polluting
+it with duplicate rows from repeated identical runs (verified live: a
+background re-enrichment mid-session produced exactly one new row, for
+exactly the one fund that had actually changed).
+
 ### Model-judgment layer (on top of the deterministic core)
 
 The engine's scores are deterministic; **interpretation is a model task**.
@@ -328,6 +389,11 @@ selection — reproducible, hash-provable), **model judgment where valuable**
   satellite pair when two candidates share an AMC — consider solving the small
   bucket-assignment problem (maximise total score subject to quotas/AMC/
   category/overlap) instead of a fixed priority order.
+- **Post-v1.2.0 addendum** (no version bump — infrastructure, not a change to
+  gates/scoring/selection, so `config_hash`/`run_hash` behavior is unaffected):
+  added `metrics_history.jsonl` longitudinal tracking (see "Longitudinal
+  history" above) and the scraper's `--refresh-days` / `--direct-growth-only`
+  cost controls (see "Parallelism & safety model" above).
 - Unused-but-captured (candidates for future versions): per-holding
   `Share Change %` trend, `First Bought` dates (not scraped), bond-holding
   credit quality (not published in the scraped table), Index columns of the
