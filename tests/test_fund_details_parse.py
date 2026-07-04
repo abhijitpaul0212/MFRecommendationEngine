@@ -128,6 +128,111 @@ def test_is_recently_enriched_handles_naive_timestamps():
     assert fd.is_recently_enriched("2026-07-15T00:00:00", 30, now=now) is True
 
 
+def _complete_entry(equity_count=2):
+    return {
+        "risk_ratings": {"5Y": {"risk_volatility_measures": {
+            "Alpha": {"Investment": "1.0", "Category": "0.5", "Index": "–"}}}},
+        "detailed_portfolio": {
+            "holdings_summary": {"Equity Holdings": str(equity_count),
+                                 "Bond Holdings": "0"},
+            "holdings": {"Equity": [{"Holdings": "A", "% Portfolio Weight": "60"},
+                                    {"Holdings": "B", "% Portfolio Weight": "40"}][:equity_count],
+                         "Bond": []}},
+    }
+
+
+def test_parse_count():
+    assert fd.parse_count("93") == 93.0
+    assert fd.parse_count("1,234") == 1234.0
+    assert fd.parse_count("—") is None
+    assert fd.parse_count("") is None
+    assert fd.parse_count(None) is None
+
+
+def test_enrichment_issues_complete_entry_is_clean():
+    assert fd.enrichment_issues(_complete_entry()) == []
+
+
+def test_enrichment_issues_never_enriched_is_none():
+    assert fd.enrichment_issues({"Category": "Flexi Cap", "Latest NAV": "10"}) is None
+
+
+def test_enrichment_issues_flags_empty_summary():
+    e = _complete_entry()
+    e["detailed_portfolio"]["holdings_summary"] = {}       # the Kotak Multicap case
+    issues = fd.enrichment_issues(e)
+    assert any("holdings_summary empty" in i for i in issues)
+
+
+def test_enrichment_issues_flags_equity_error_and_empty_with_count():
+    e = _complete_entry()
+    e["detailed_portfolio"]["holdings"]["Equity"] = {"error": "boom"}
+    assert any("Equity holdings error" in i for i in fd.enrichment_issues(e))
+    e = _complete_entry()
+    e["detailed_portfolio"]["holdings"]["Equity"] = []      # but summary says 2
+    assert any("Equity holdings empty but summary says 2" in i
+               for i in fd.enrichment_issues(e))
+
+
+def test_enrichment_issues_zero_equity_and_bare_bond_are_ok():
+    e = _complete_entry(equity_count=0)
+    e["detailed_portfolio"]["holdings_summary"]["Equity Holdings"] = "0"
+    assert fd.enrichment_issues(e) == []                    # debt/index fund: fine
+    e = _complete_entry()
+    e["detailed_portfolio"]["holdings_summary"]["Bond Holdings"] = "5"
+    assert fd.enrichment_issues(e) == []   # empty Bond list tolerated (site hides tab)
+    e["detailed_portfolio"]["holdings"]["Bond"] = {"error": "x"}
+    assert any("Bond holdings error" in i for i in fd.enrichment_issues(e))
+
+
+def test_enrichment_issues_flags_missing_or_empty_risk():
+    e = _complete_entry()
+    del e["risk_ratings"]
+    assert "no risk_ratings" in fd.enrichment_issues(e)
+    e = _complete_entry()
+    e["risk_ratings"] = {"5Y": {"risk_volatility_measures": {}}}
+    assert any("risk tables empty" in i for i in fd.enrichment_issues(e))
+
+
+def test_allowed_workers_policy():
+    aw = fd.allowed_workers
+    assert aw(6, 4.5) == 6          # plenty of headroom: full fleet
+    assert aw(6, 2.5) == 3          # 2-3 GB: half
+    assert aw(6, 1.5) == 1          # 1-2 GB: single sequential worker
+    assert aw(6, 0.7) == 0          # < 1 GB: full pause
+    assert aw(1, 2.5) == 1          # half of 1 floors at 1
+    assert aw(6, None) == 6         # unknown -> fail open (watchdog still alerts)
+
+
+def test_parse_vm_stat():
+    sample = (
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                                    1000.\n"
+        "Pages active:                                 85070.\n"
+        "Pages inactive:                                2000.\n"
+        "Pages speculative:                              500.\n")
+    assert fd.parse_vm_stat(sample) == (1000 + 2000 + 500) * 16384
+    assert fd.parse_vm_stat("") == 0
+
+
+def test_available_memory_gb_returns_sane_value():
+    v = fd.available_memory_gb()
+    assert v is None or (0 < v < 2048)     # sane on any real machine
+
+
+def test_slot_gating_acquire_release():
+    s = fd.MorningstarScraper("/tmp/x", workers=2)
+    assert s._acquire_slot() is True
+    assert s._acquire_slot() is True       # both slots taken
+    s._set_max_active(0)                   # governor pauses everything
+    assert s._acquire_slot() is False      # no slot; caller should drop browser
+    s._release_slot()
+    s._release_slot()
+    s._set_max_active(1)
+    assert s._acquire_slot() is True       # resumes with reduced concurrency
+    s._release_slot()
+
+
 def test_merge_list_preserving_enrichment():
     existing = {
         "Fund A": {"Category": "Old Cat", "Latest NAV": "10",

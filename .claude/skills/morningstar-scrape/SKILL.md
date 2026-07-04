@@ -87,13 +87,36 @@ fails is recorded per house/fund in the manifest (`failed_fund_houses`,
 `fund_failures`) instead of aborting the run — check those after long runs
 and re-run the same command to fill gaps.
 
+Resource safety is FULLY AUTOMATIC (README "Resource governor & watchdog" —
+no manual step, do not tell the user to start anything): every run gets
+(1) the internal governor — samples free RAM every 15s, heartbeats to
+`<out>/_resource_monitor.log`, throttles worker slots as memory tightens and
+fully pauses (browsers released) below 1 GB, resuming automatically, with
+console + macOS-notification alerts on every change; and (2) the external
+watchdog, auto-spawned as a separate process (`<out>/_watchdog.log`) — it
+alerts the user below 2 GB, freezes/thaws the whole scrape tree in a true
+emergency, deduplicates itself, and exits when the run completes.
+
+Completeness guarantees (README "Data-completeness model" has the full
+rationale): every enrichment result is VALIDATED before saving (empty
+holdings summary / error'd Equity / empty risk tables = failed attempt,
+retried, never stamped `enriched_at`); index/debt funds with no
+Equity/Bond/Others switcher are read as single-table pages; after the enrich
+phase an AUDIT double-checks every expected fund against what's complete on
+disk and re-extracts anything missing (2 repair rounds); leftovers land in
+the manifest's `incomplete_enrichments`. After any long run, check that field
+— if non-empty, re-running the same command repairs it (`--refresh-days`
+never trusts an incomplete entry, regardless of its timestamp).
+
 ## Expected output (validate before declaring success)
 
 - `ms_data/filters.json` — 4 dropdown groups; ~47 fund houses.
 - `ms_data/<Fund_House>.json` — one per house; keys are fund names.
-- `ms_data/morningstar_factsheet.json` — combined; check the manifest:
-  `failed_fund_houses` must be `{}`, and `total_schemes` must equal both
-  `len(funds)` and the sum of per-house counts (~14,000 for the full universe).
+- `ms_data/morningstar_factsheet.json` — manifest HEADER only (fund data
+  lives solely in the per-house files; the payload sha256 pins the combined
+  snapshot). Check it after every run: `failed_fund_houses` must be `{}`,
+  `incomplete_enrichments` should be empty, and `total_schemes` must equal
+  the sum of per-house counts (~14,000 for the full universe).
 - After enrichment, each processed fund gains `detail_url`,
   `detailed_portfolio` (holdings_summary + holdings.Equity/Bond lists),
   `risk_ratings` (3Y/5Y/10Y, each with 5 risk metrics × Investment/Category/

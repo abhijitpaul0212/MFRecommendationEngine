@@ -204,12 +204,69 @@ refreshed by the (cheap) list phase on every run regardless of this flag. Re-
 scraping all detail pages on every run buys almost nothing beyond what the
 list phase already provides, at the full multi-hour cost. Without this flag
 (default), every run re-enriches everything — safe, but expensive. A fund
-that has never been enriched (no `enriched_at`) is always scraped.
+that has never been enriched (no `enriched_at`) is always scraped — and so is
+a fund whose saved enrichment is *incomplete* (the freshness skip only trusts
+entries that pass `enrichment_issues`, below).
+
+### Resource governor & watchdog (laptop-safe scraping)
+
+Sized for real hardware: on an 8 GB machine, 6 parallel Chromes plus macOS
+leaves very little headroom — RAM exhaustion, not CPU, is what crashes runs.
+Two layers keep that impossible:
+
+1. **Internal governor** (in the scraper): a monitor thread samples available
+   memory every 15s, writes a heartbeat to `<out>/_resource_monitor.log`, and
+   adjusts how many worker slots may run concurrently
+   (`allowed_workers`: ≥3 GB → full fleet, 2–3 GB → half, 1–2 GB → one
+   sequential worker, <1 GB → full pause). Workers gate on a slot per task;
+   during a full pause they QUIT their browsers so the RAM is actually
+   returned to the OS, then restart sessions when memory recovers. Alerts go
+   to stdout + a macOS notification on every throttle change.
+2. **External watchdog** (`scraper/resource_watchdog.py`): **auto-started by
+   the scraper with every run — no manual step.** An independent process (so
+   it can act even if the scraper itself wedges): keeps the same monitoring
+   log alive, alerts below 2 GB available, and in a true emergency (<1 GB)
+   freezes the entire scrape tree with SIGSTOP until memory recovers
+   (> 3 GB), then thaws it. A thawed run self-heals: timed-out attempts fail,
+   sessions restart, and the completeness audit re-extracts whatever was
+   lost. It deduplicates itself across overlapping runs, terminates when the
+   run completes, and logs its lifecycle to `<out>/_watchdog.log`. (It can
+   still be run standalone: `python scraper/resource_watchdog.py`.)
+
+### Data-completeness model (validate → audit → repair)
+
+Lesson learned live: a render race once saved a fund with an empty holdings
+summary as "success", stamped it `enriched_at`, and the engine then
+recommended it — its 18% overlap with another pick invisible to the overlap
+rule. Three layers now prevent that class of failure:
+
+1. **Validate before save** (`enrichment_issues`, pure + unit-tested): an
+   enrichment result with an empty holdings summary, an error'd/empty-with-
+   positive-count Equity list, or all-empty risk tables is a FAILED attempt —
+   retried on a fresh browser session, and never stamped `enriched_at`.
+   Deliberately strict on Equity (the overlap rule depends on it) and lenient
+   where Morningstar itself exposes nothing: an empty Bond list with a
+   positive summary count is accepted (the site often renders no Bond tab for
+   small bond sleeves); index/debt funds with zero equity are legitimate.
+2. **Single-table pages handled**: index/debt funds render NO Equity/Bond/
+   Others switcher (one holdings type only) — the visible table is read
+   directly and attributed to the type with the largest positive summary
+   count, instead of erroring on the missing switcher.
+3. **Audit + repair (the count double-check)**: after the enrich phase, every
+   expected (house, fund) is re-checked against what's actually complete on
+   disk; anything missing or incomplete is re-extracted with its full
+   dataset, up to `REPAIR_ROUNDS` (2) times. Whatever still fails is printed
+   and recorded in the manifest under `incomplete_enrichments` — a bad or
+   missing enrichment can never pass silently.
 
 Outputs in `ms_data/`: `filters.json` (all dropdown values), one
-`<Fund_House>.json` per house (fund-name keys, same structure as always), and
-`morningstar_factsheet.json` (combined manifest: `scraped_at`, per-house
-counts, enriched count, failures, payload sha256 pinning the snapshot).
+`<Fund_House>.json` per house (fund-name keys, same structure as always — the
+CANONICAL store all consumers read), and `morningstar_factsheet.json` — the
+snapshot manifest **header only** (`scraped_at`, per-house counts, enriched
+count, failures, `incomplete_enrichments`, payload sha256 computed over the
+combined per-house content, so it still pins the snapshot). Fund data is
+deliberately NOT duplicated inside the manifest file — that duplication used
+to double total disk for zero informational gain.
 
 Note: Morningstar's public holdings table can display fewer rows than the
 holdings-summary counts (e.g. 74 of 93 equity positions) — the scraper captures

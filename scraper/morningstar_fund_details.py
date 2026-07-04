@@ -73,6 +73,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -85,6 +87,7 @@ POSTBACK_TIMEOUT = 30
 PAGE_LOAD_TIMEOUT = 90      # renderer stalls happen under parallel load
 MAX_PAGES_GUARD = 500       # hard stop against infinite pagination loops
 SESSION_RESTART_ATTEMPTS = 3  # browser (re)starts per worker before giving up
+REPAIR_ROUNDS = 2             # post-run completeness audit re-extraction passes
 SAL_WAIT_TIMEOUT = 45       # SAL widgets fetch data after page load
 SECONDS_PER_FUND_EST = 50   # for the runtime estimate printed before enrichment
 
@@ -322,6 +325,119 @@ def is_direct_growth(name):
     low = (name or "").lower()
     return ("direct" in low and "growth" in low
             and not any(t in low for t in DIRECT_GROWTH_EXCLUDES))
+
+
+def parse_count(s):
+    """Holdings-summary count cell -> float|None ('—'/blank -> None)."""
+    t = str(s or "").strip().replace(",", "")
+    if t in ("", "—", "–", "-"):
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def enrichment_issues(entry):
+    """Completeness check for a fund's enrichment. Pure; used three ways:
+    (1) validate-before-save in the enrich worker (incomplete results are
+    retried, never stamped with enriched_at), (2) the post-run audit that
+    re-extracts anything missing, (3) the --refresh-days guard, so a stale
+    BAD entry is always re-scraped even if recent.
+
+    Returns None when the entry has never been enriched at all, [] when
+    complete, else a list of issue strings. Deliberately strict on Equity
+    (the engine's overlap rule depends on it) and lenient where Morningstar
+    itself exposes nothing: an empty Bond list with a positive summary count
+    is accepted (the site often renders no Bond tab for small bond sleeves),
+    but an error dict is always an issue."""
+    rr = entry.get("risk_ratings")
+    dp = entry.get("detailed_portfolio")
+    if rr is None and dp is None:
+        return None
+    issues = []
+    if not rr:
+        issues.append("no risk_ratings")
+    elif not any((h or {}).get("risk_volatility_measures") for h in rr.values()):
+        issues.append("risk tables empty in all horizons")
+    if not dp:
+        issues.append("no detailed_portfolio")
+        return issues
+    summary = dp.get("holdings_summary") or {}
+    if not summary:
+        issues.append("holdings_summary empty (page not fully rendered)")
+    holdings = dp.get("holdings") or {}
+    eq = holdings.get("Equity")
+    if isinstance(eq, dict):
+        issues.append(f"Equity holdings error: {eq.get('error', '?')}")
+    else:
+        cnt = parse_count(summary.get("Equity Holdings"))
+        if cnt and cnt > 0 and not eq:
+            issues.append(f"Equity holdings empty but summary says {int(cnt)}")
+    if isinstance(holdings.get("Bond"), dict):
+        issues.append(f"Bond holdings error: {holdings['Bond'].get('error', '?')}")
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Resource governor policy (pure parts) — keeps parallel Chrome from
+# exhausting laptop RAM. The governor thread samples available memory and
+# adjusts how many worker slots may run concurrently; at the extreme it
+# pauses everything (workers release their browsers) until memory recovers.
+# ---------------------------------------------------------------------------
+
+def parse_vm_stat(text):
+    """macOS `vm_stat` output -> approximate available bytes
+    (free + inactive + speculative pages x page size). Pure; unit-tested."""
+    m = re.search(r"page size of (\d+)", text or "")
+    page = int(m.group(1)) if m else 4096
+    total = 0
+    for name in ("free", "inactive", "speculative"):
+        mm = re.search(rf"Pages {name}:\s+(\d+)", text or "")
+        total += int(mm.group(1)) if mm else 0
+    return total * page
+
+
+def available_memory_gb():
+    """Best-effort available system memory in GB (psutil if installed, else
+    macOS vm_stat, else Linux /proc/meminfo). None when undeterminable."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 2**30
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                             timeout=5).stdout
+        b = parse_vm_stat(out)
+        if b > 0:
+            return b / 2**30
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024 / 2**30
+    except Exception:
+        pass
+    return None
+
+
+def allowed_workers(configured, available_gb):
+    """Governor policy: how many worker slots current memory supports.
+    >= 3 GB available -> full fleet; 2-3 GB -> half; 1-2 GB -> single
+    sequential worker; < 1 GB -> full pause (0 slots, browsers released).
+    Unknown (None) fails open — the external watchdog still alerts."""
+    if available_gb is None:
+        return configured
+    if available_gb >= 3.0:
+        return configured
+    if available_gb >= 2.0:
+        return max(1, configured // 2)
+    if available_gb >= 1.0:
+        return 1
+    return 0
 
 
 def is_recently_enriched(enriched_at, refresh_days, now=None):
@@ -879,18 +995,52 @@ class FundDetailPage:
         self._js_click(option)
         self._wait_change(self._first_holding_name, before)
 
+    def _has_type_switcher(self):
+        """True when the Equity/Bond/Others switcher is rendered in either of
+        its two forms (button group at desktop width, popup dropdown on small
+        viewports). Funds with a single holdings type render NO switcher."""
+        if self._type_buttons():
+            return True
+        By = self.S["By"]
+        for b in self.d.find_elements(By.CSS_SELECTOR, "button[aria-haspopup='true']"):
+            if clean(b.get_attribute("textContent")) in ("Equity", "Bond", "Other", "Others"):
+                return True
+        return False
+
     def read_detailed_portfolio(self):
         summary = self.read_holdings_summary()
-        holdings = {}
+        holdings = {h: [] for h in HOLDING_TYPES}
+
+        def count_of(htype):
+            return parse_count(summary.get(f"{htype} Holdings")) or 0
+
+        if not self._has_type_switcher():
+            # Single-type page (typical for index and debt funds): no switcher
+            # exists to click — the visible table IS the fund's only holdings
+            # list. Attribute its rows to the type with the largest positive
+            # summary count (Equity when counts are unavailable).
+            try:
+                rows = self.read_all_holdings_pages()
+            except Exception as e:
+                holdings["Equity"] = {"error": str(e)}
+                return {"holdings_summary": summary, "holdings": holdings}
+            target = max(HOLDING_TYPES, key=count_of)
+            if count_of(target) <= 0:
+                target = "Equity"
+            holdings[target] = rows
+            return {"holdings_summary": summary, "holdings": holdings}
+
         for htype in HOLDING_TYPES:
             try:
                 self.select_holding_type(htype)
                 holdings[htype] = self.read_all_holdings_pages()
             except Exception as e:
-                # Zero holdings of a type -> no switch button at all: empty
-                # list, not an error (e.g. Bond for an equity index fund).
-                count = summary.get(f"{htype} Holdings", "").strip()
-                if count in ("0", "—", "–", ""):
+                if count_of(htype) <= 0:
+                    holdings[htype] = []      # truly none of this type
+                elif htype == "Bond":
+                    # Morningstar often renders no Bond tab for small bond
+                    # sleeves even when the summary counts them — the site
+                    # simply doesn't expose the rows. Empty, not an error.
                     holdings[htype] = []
                 else:
                     holdings[htype] = {"error": str(e)}
@@ -1012,6 +1162,83 @@ class MorningstarScraper:
         self.house_urls = {}     # house -> {fund: href}
         self.failed_houses = {}
         self.fund_failures = {}  # house -> {fund: err}
+        # governor state: how many worker slots may run concurrently
+        self._slot_cv = threading.Condition()
+        self._max_active = self.workers
+        self._active_slots = 0
+
+    # ---------------- resource governor ----------------
+    def _acquire_slot(self):
+        """Take a concurrency slot. Returns False (without a slot) when the
+        governor has zeroed concurrency, so the caller can quit its browser
+        (freeing its RAM) before retrying; True once a slot is held."""
+        with self._slot_cv:
+            while True:
+                if self._max_active <= 0:
+                    return False
+                if self._active_slots < self._max_active:
+                    self._active_slots += 1
+                    return True
+                self._slot_cv.wait(timeout=10.0)
+
+    def _release_slot(self):
+        with self._slot_cv:
+            self._active_slots = max(0, self._active_slots - 1)
+            self._slot_cv.notify_all()
+
+    def _set_max_active(self, n):
+        with self._slot_cv:
+            if n != self._max_active:
+                self._max_active = n
+                self._slot_cv.notify_all()
+
+    def _alert(self, msg):
+        print(f"  RESOURCE ALERT: {msg}", flush=True)
+        try:                                     # macOS desktop notification
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{msg}" with title "MF Scraper"'],
+                capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+    def _governor_loop(self, stop_evt, interval=15):
+        """Monitor thread: samples available memory every `interval` seconds,
+        writes a heartbeat line to <out>/_resource_monitor.log, and throttles
+        worker slots per allowed_workers(). Soft throttle (fewer slots) keeps
+        idle browsers alive; full pause (0 slots) makes waiting workers QUIT
+        their browsers so their RAM is actually returned to the OS."""
+        log_path = os.path.join(self.out_dir, "_resource_monitor.log")
+        while not stop_evt.wait(interval):
+            avail = available_memory_gb()
+            target = allowed_workers(self.workers, avail)
+            try:
+                load1 = os.getloadavg()[0]
+            except OSError:
+                load1 = -1.0
+            with self._slot_cv:
+                current, active = self._max_active, self._active_slots
+            line = (f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                    f"avail={avail if avail is None else round(avail, 2)}GB "
+                    f"load1={load1:.1f} slots={active}/{current} "
+                    f"target={target}/{self.workers}")
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
+            if target != current:
+                if target == 0:
+                    self._alert(f"available RAM {avail:.1f} GB < 1 GB — "
+                                f"PAUSING all workers (browsers released) "
+                                f"until memory recovers")
+                elif target < current:
+                    self._alert(f"available RAM {avail:.1f} GB — throttling "
+                                f"to {target}/{self.workers} worker(s)")
+                else:
+                    self._alert(f"memory recovered ({avail:.1f} GB) — "
+                                f"restoring {target}/{self.workers} worker(s)")
+                self._set_max_active(target)
 
     def _house_path(self, house):
         return os.path.join(self.out_dir, f"{safe_house_name(house)}.json")
@@ -1085,51 +1312,64 @@ class MorningstarScraper:
         try:
             d, page = fresh_session(None)
             for house in houses:
-                if page is None:                    # try to heal before skipping
-                    d, page = fresh_session(d)
-                if page is None:
-                    with self._lock:
-                        self.failed_houses[house] = (
-                            "browser session could not be (re)started")
-                    print(f"  [w{worker_id}] SKIP '{house}': no browser session",
-                          flush=True)
-                    continue
-                last_err, fresh, urls = None, None, None
-                for attempt in (1, 2):
-                    try:
-                        fresh, urls = self.list_house(page, house)
-                        last_err = None
-                        break
-                    except Exception as e:
-                        last_err = e
-                        print(f"  [w{worker_id}] list '{house}' attempt "
-                              f"{attempt} failed: {e}", flush=True)
+                # governor gate: waits for a slot; when fully paused, quit the
+                # browser so its RAM is actually returned to the OS
+                while not self._acquire_slot():
+                    if d is not None:
                         try:
-                            page.open_factsheet()       # soft reset
+                            d.quit()
                         except Exception:
-                            d, page = fresh_session(d)  # hard reset; never raises
-                            if page is None:
-                                break
-                if last_err is not None or fresh is None:
-                    with self._lock:
-                        self.failed_houses[house] = str(last_err or "no data")
-                    continue
-                path = self._house_path(house)
-                with self._lock:
-                    existing = {}
-                    if os.path.exists(path):
+                            pass
+                        d = page = None
+                    time.sleep(10)
+                try:
+                    if page is None:                # heal before skipping
+                        d, page = fresh_session(d)
+                    if page is None:
+                        with self._lock:
+                            self.failed_houses[house] = (
+                                "browser session could not be (re)started")
+                        print(f"  [w{worker_id}] SKIP '{house}': no browser "
+                              f"session", flush=True)
+                        continue
+                    last_err, fresh, urls = None, None, None
+                    for attempt in (1, 2):
                         try:
-                            with open(path, encoding="utf-8") as f:
-                                existing = json.load(f)
-                        except Exception:
-                            existing = {}
-                    merged = merge_list_preserving_enrichment(existing, fresh)
-                    self.house_data[house] = merged
-                    self.house_urls[house] = urls
-                    atomic_write_json(path, merged)
-                kept = sum(1 for v in merged.values() if "risk_ratings" in v)
-                print(f"  [list] {house}: {len(merged)} funds "
-                      f"({kept} previously enriched preserved)", flush=True)
+                            fresh, urls = self.list_house(page, house)
+                            last_err = None
+                            break
+                        except Exception as e:
+                            last_err = e
+                            print(f"  [w{worker_id}] list '{house}' attempt "
+                                  f"{attempt} failed: {e}", flush=True)
+                            try:
+                                page.open_factsheet()       # soft reset
+                            except Exception:
+                                d, page = fresh_session(d)  # hard reset
+                                if page is None:
+                                    break
+                    if last_err is not None or fresh is None:
+                        with self._lock:
+                            self.failed_houses[house] = str(last_err or "no data")
+                        continue
+                    path = self._house_path(house)
+                    with self._lock:
+                        existing = {}
+                        if os.path.exists(path):
+                            try:
+                                with open(path, encoding="utf-8") as f:
+                                    existing = json.load(f)
+                            except Exception:
+                                existing = {}
+                        merged = merge_list_preserving_enrichment(existing, fresh)
+                        self.house_data[house] = merged
+                        self.house_urls[house] = urls
+                        atomic_write_json(path, merged)
+                    kept = sum(1 for v in merged.values() if "risk_ratings" in v)
+                    print(f"  [list] {house}: {len(merged)} funds "
+                          f"({kept} previously enriched preserved)", flush=True)
+                finally:
+                    self._release_slot()
         finally:
             if d is not None:
                 try:
@@ -1140,7 +1380,11 @@ class MorningstarScraper:
     # ---------------- enrich phase ----------------
     def enrich_fund(self, dp, href):
         tabs = derive_tab_urls(href)
-        dp.open(tabs["detailed_portfolio"], wait_css=".sal-dp-pair")
+        # Wait for the holdings-summary pairs specifically (not just any
+        # .sal-dp-pair elsewhere on the page) — reading before that component
+        # renders was the cause of empty-summary enrichments.
+        dp.open(tabs["detailed_portfolio"],
+                wait_css=".holdings-summary .sal-dp-pair")
         portfolio = dp.read_detailed_portfolio()
         dp.open(tabs["risk_ratings"], wait_css=RISK_TABLE_CSS)
         risk = dp.read_all_risk_years()
@@ -1171,43 +1415,68 @@ class MorningstarScraper:
         try:
             d, dp = fresh_session(None)
             for house, name, href in tasks:
-                if dp is None:                      # try to heal before skipping
-                    d, dp = fresh_session(d)
-                if dp is None:
-                    with self._lock:
-                        self.fund_failures.setdefault(house, {})[name] = (
-                            "browser session could not be (re)started")
-                    continue
-                last_err = None
-                for attempt in (1, 2):
-                    try:
-                        portfolio, risk = self.enrich_fund(dp, href)
-                        last_err = None
-                        break
-                    except Exception as e:
-                        last_err = e
-                        print(f"  [w{worker_id}] enrich '{name}' attempt "
-                              f"{attempt} failed: {e}", flush=True)
-                        d, dp = fresh_session(d)    # hard reset; never raises
-                        if dp is None:
+                # governor gate: waits for a slot; when fully paused, quit the
+                # browser so its RAM is actually returned to the OS
+                while not self._acquire_slot():
+                    if d is not None:
+                        try:
+                            d.quit()
+                        except Exception:
+                            pass
+                        d = dp = None
+                    time.sleep(10)
+                try:
+                    if dp is None:                  # try to heal before skipping
+                        d, dp = fresh_session(d)
+                    if dp is None:
+                        with self._lock:
+                            self.fund_failures.setdefault(house, {})[name] = (
+                                "browser session could not be (re)started")
+                        continue
+                    last_err = None
+                    for attempt in (1, 2):
+                        try:
+                            portfolio, risk = self.enrich_fund(dp, href)
+                            # Validate BEFORE saving: an incomplete result
+                            # (empty summary, error'd holdings, empty risk
+                            # tables) is a failed attempt, never stamped with
+                            # enriched_at — otherwise --refresh-days would
+                            # trust bad data.
+                            issues = enrichment_issues(
+                                {"detailed_portfolio": portfolio,
+                                 "risk_ratings": risk})
+                            if issues:
+                                raise RuntimeError(
+                                    "incomplete enrichment: " + "; ".join(issues))
+                            last_err = None
                             break
-                if last_err is not None or dp is None:
+                        except Exception as e:
+                            last_err = e
+                            print(f"  [w{worker_id}] enrich '{name}' attempt "
+                                  f"{attempt} failed: {e}", flush=True)
+                            d, dp = fresh_session(d)    # hard reset; never raises
+                            if dp is None:
+                                break
+                    if last_err is not None or dp is None:
+                        with self._lock:
+                            self.fund_failures.setdefault(house, {})[name] = str(
+                                last_err or "browser session lost")
+                        continue
                     with self._lock:
-                        self.fund_failures.setdefault(house, {})[name] = str(
-                            last_err or "browser session lost")
-                    continue
-                with self._lock:
-                    self.house_data[house][name] = nest_fund_details(
-                        self.house_data[house][name], detail_url=href,
-                        detailed_portfolio=portfolio, risk_ratings=risk,
-                        enriched_at=datetime.now(timezone.utc).isoformat())
-                    atomic_write_json(self._house_path(house), self.house_data[house])
-                eq = portfolio["holdings"].get("Equity")
-                bd = portfolio["holdings"].get("Bond")
-                print(f"  [enrich] {name}: equity="
-                      f"{len(eq) if isinstance(eq, list) else 'ERR'} bond="
-                      f"{len(bd) if isinstance(bd, list) else 'ERR'} "
-                      f"risk={sorted(risk)}", flush=True)
+                        self.house_data[house][name] = nest_fund_details(
+                            self.house_data[house][name], detail_url=href,
+                            detailed_portfolio=portfolio, risk_ratings=risk,
+                            enriched_at=datetime.now(timezone.utc).isoformat())
+                        atomic_write_json(self._house_path(house), self.house_data[house])
+                        self.fund_failures.get(house, {}).pop(name, None)
+                    eq = portfolio["holdings"].get("Equity")
+                    bd = portfolio["holdings"].get("Bond")
+                    print(f"  [enrich] {name}: equity="
+                          f"{len(eq) if isinstance(eq, list) else 'ERR'} bond="
+                          f"{len(bd) if isinstance(bd, list) else 'ERR'} "
+                          f"risk={sorted(risk)}", flush=True)
+                finally:
+                    self._release_slot()
         finally:
             if d is not None:
                 try:
@@ -1215,12 +1484,54 @@ class MorningstarScraper:
                 except Exception:
                     pass
 
+    # ---------------- audit + repair ----------------
+    def _dispatch_enrichment(self, tasks, label):
+        """Fan a task list out across worker browsers; never raises."""
+        if not tasks:
+            return
+        n = min(self.workers, len(tasks)) or 1
+        buckets = [tasks[i::n] for i in range(n)]
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futs = [pool.submit(self._enrich_worker, i, b)
+                    for i, b in enumerate(buckets) if b]
+            for f in as_completed(futs):
+                try:
+                    f.result()
+                except Exception as e:   # workers shouldn't raise; last-resort shield
+                    print(f"  {label} worker crashed (others continue): {e}",
+                          flush=True)
+
+    def _audit_enrichment(self, expected_tasks):
+        """The count double-check: every expected (house, fund, url) must have
+        a COMPLETE enrichment on disk. Returns [(house, name, href, issues)]
+        for anything missing or incomplete."""
+        out = []
+        with self._lock:
+            for house, name, href in expected_tasks:
+                entry = (self.house_data.get(house) or {}).get(name)
+                if entry is None:
+                    out.append((house, name, href,
+                                ["fund missing from house data"]))
+                    continue
+                issues = enrichment_issues(entry)
+                if issues is None:
+                    issues = ["not enriched (all attempts failed)"]
+                if issues:
+                    out.append((house, name, href, issues))
+        return out
+
     # ---------------- manifest ----------------
     def write_manifest(self):
         combined = {}
         with self._lock:
             for house in sorted(self.house_data):
                 merge_house_into(combined, self.house_data[house])
+            incomplete = {}
+            for house, data in sorted(self.house_data.items()):
+                for name, entry in sorted(data.items()):
+                    iss = enrichment_issues(entry)
+                    if iss:                    # [] = complete, None = never enriched
+                        incomplete.setdefault(house, {})[name] = iss
             manifest = {
                 "source": BASE_URL,
                 "scraped_at": datetime.now(timezone.utc).isoformat(),
@@ -1232,14 +1543,23 @@ class MorningstarScraper:
                 "failed_fund_houses": dict(sorted(self.failed_houses.items())),
                 "fund_failures": {h: dict(sorted(f.items()))
                                   for h, f in sorted(self.fund_failures.items())},
+                # Enriched entries whose data is INCOMPLETE (empty summary,
+                # error'd holdings, empty risk tables) — audited every run so
+                # a bad enrichment can never pass silently.
+                "incomplete_enrichments": incomplete,
                 "total_schemes": len(combined),
                 "payload_sha256": payload_hash(combined),
-                "note": ("Live-site snapshot: downstream framework runs pin this "
-                         "file by hash; the site itself changes over time."),
+                "note": ("Live-site snapshot manifest. Fund data lives ONLY in "
+                         "the per-house JSON files (the canonical store); "
+                         "payload_sha256 is computed over their combined "
+                         "content, so this header still pins the snapshot."),
             }
+            # Manifest header ONLY — embedding a full copy of every fund here
+            # doubled total disk for zero informational gain (the engine and
+            # every consumer read the per-house files).
             atomic_write_json(
                 os.path.join(self.out_dir, "morningstar_factsheet.json"),
-                {"manifest": manifest, "funds": combined})
+                {"manifest": manifest})
         return manifest
 
     # ---------------- run ----------------
@@ -1247,6 +1567,46 @@ class MorningstarScraper:
             refresh_days=None):
         os.makedirs(self.out_dir, exist_ok=True)
 
+        # Resource governor: keeps a heartbeat in <out>/_resource_monitor.log
+        # and throttles/pauses worker slots when the machine runs low on RAM,
+        # so parallel Chrome can never exhaust the laptop and crash the run.
+        stop_governor = threading.Event()
+        governor = threading.Thread(
+            target=self._governor_loop, args=(stop_governor,), daemon=True)
+        governor.start()
+
+        # External watchdog: auto-started with EVERY run (permanent — no
+        # manual step). A separate process, so it can still alert the user
+        # and freeze/thaw the scrape tree even if this process itself wedges.
+        # It deduplicates itself and self-terminates when the run completes.
+        watchdog = None
+        try:
+            wd_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "resource_watchdog.py")
+            wd_log = open(os.path.join(self.out_dir, "_watchdog.log"), "a")
+            watchdog = subprocess.Popen(
+                [sys.executable, wd_path,
+                 "--log", os.path.join(self.out_dir, "_resource_monitor.log")],
+                stdout=wd_log, stderr=subprocess.STDOUT)
+            print(f"resource watchdog started (pid {watchdog.pid}) -> "
+                  f"{self.out_dir}/_watchdog.log", flush=True)
+        except Exception as e:
+            print(f"NOTE: external watchdog could not start ({e}); the "
+                  f"internal governor is still active.", flush=True)
+
+        try:
+            return self._run(houses, funds, enrich, direct_growth_only,
+                             refresh_days)
+        finally:
+            stop_governor.set()
+            if watchdog is not None:            # run over -> monitoring over
+                try:
+                    watchdog.terminate()
+                except Exception:
+                    pass
+
+    def _run(self, houses, funds, enrich, direct_growth_only, refresh_days):
         all_houses = self.discover_houses()
         if houses:
             wanted = {h.lower() for h in houses}
@@ -1292,8 +1652,14 @@ class MorningstarScraper:
                 skipped_plan += before - len(names)
             if refresh_days:
                 before = len(names)
-                names = [x for x in names if not is_recently_enriched(
-                    self.house_data[house][x].get("enriched_at"), refresh_days)]
+                # Skip only entries that are BOTH fresh AND complete — a bad
+                # enrichment (e.g. empty summary from a render race) is always
+                # re-scraped regardless of its enriched_at timestamp.
+                names = [x for x in names
+                         if not (is_recently_enriched(
+                                     self.house_data[house][x].get("enriched_at"),
+                                     refresh_days)
+                                 and not enrichment_issues(self.house_data[house][x]))]
                 skipped_fresh += before - len(names)
             if self.limit:
                 names = names[: self.limit]
@@ -1321,23 +1687,42 @@ class MorningstarScraper:
         est_min = len(tasks) * SECONDS_PER_FUND_EST / max(1, self.workers) / 60
         print(f"ENRICH phase: {len(tasks)} fund(s) across {self.workers} "
               f"browser(s) (~{est_min:.0f} min estimated)...", flush=True)
-        n = min(self.workers, len(tasks)) or 1
-        buckets = [tasks[i::n] for i in range(n)]
-        with ThreadPoolExecutor(max_workers=n) as pool:
-            futs = [pool.submit(self._enrich_worker, i, b)
-                    for i, b in enumerate(buckets) if b]
-            for f in as_completed(futs):
-                try:
-                    f.result()
-                except Exception as e:   # workers shouldn't raise; last-resort shield
-                    print(f"  ENRICH worker crashed (others continue): {e}",
-                          flush=True)
+        self._dispatch_enrichment(tasks, "ENRICH")
+
+        # Phase C: COMPLETENESS AUDIT + targeted repair. Double-check the
+        # count (expected tasks vs entries that are actually complete on
+        # disk); anything missing or incomplete is re-extracted with its full
+        # dataset, up to REPAIR_ROUNDS times. Whatever still fails is printed
+        # and recorded in the manifest — never silently passed.
+        expected = list(tasks)
+        for round_no in range(1, REPAIR_ROUNDS + 1):
+            incomplete = self._audit_enrichment(expected)
+            if not incomplete:
+                break
+            print(f"AUDIT: {len(expected) - len(incomplete)}/{len(expected)} "
+                  f"complete; re-extracting {len(incomplete)} fund(s) — "
+                  f"repair round {round_no}/{REPAIR_ROUNDS}...", flush=True)
+            for house, name, _, iss in incomplete[:8]:
+                print(f"    {name[:58]}: {'; '.join(iss)[:90]}", flush=True)
+            if len(incomplete) > 8:
+                print(f"    ... and {len(incomplete) - 8} more", flush=True)
+            self._dispatch_enrichment(
+                [(h, n_, u) for h, n_, u, _ in incomplete], f"REPAIR{round_no}")
+        still = self._audit_enrichment(expected)
+        if still:
+            print(f"WARNING: {len(still)} fund(s) still incomplete after "
+                  f"{REPAIR_ROUNDS} repair round(s) — see manifest "
+                  f"incomplete_enrichments.", flush=True)
+        else:
+            print(f"AUDIT: all {len(expected)} expected fund(s) complete.",
+                  flush=True)
 
         manifest = self.write_manifest()
         print(f"done: {manifest['total_schemes']} schemes, "
               f"{manifest['enriched_funds']} enriched, "
               f"{len(manifest['failed_fund_houses'])} house failures, "
-              f"{sum(len(v) for v in manifest['fund_failures'].values())} fund failures",
+              f"{sum(len(v) for v in manifest['fund_failures'].values())} fund failures, "
+              f"{sum(len(v) for v in manifest['incomplete_enrichments'].values())} incomplete",
               flush=True)
         return self.house_data
 
