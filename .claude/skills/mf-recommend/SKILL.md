@@ -14,7 +14,7 @@ output is fully reproducible from a pinned snapshot.
 
 The full data dictionary, gate table, scoring weights and the REASONING behind
 each is maintained in README.md under "Recommendation engine — knowledge base"
-— read that section before changing anything. Summary (engine v1.1.0):
+— read that section before changing anything. Summary (engine v1.4.0):
 1. **Universe** — only enriched funds (having `risk_ratings`), filtered to
    Direct+Growth plans by name, mapped to buckets:
    core (Flexi/Large/Large&Mid/Focused), growth (Mid-Cap),
@@ -39,6 +39,13 @@ each is maintained in README.md under "Recommendation engine — knowledge base"
    max 1 per category, pairwise equity-holdings overlap <= 10% (from scraped
    holding names+weights). Every pick carries a `recommendation_reason`
    assembled from the same numbers that drove the gates and score.
+6. **v1.4 additions**: per-pick BENCH of pre-validated same-bucket
+   substitutes (drop-in-replacement semantics); `--exclude 'Fund'`
+   (repeatable) for closed-loop re-selection — the fund stays ranked but is
+   barred from picking, logged as `excluded_by_config`, and hashed into
+   `config_hash`; holdings-coverage tracking with rigorous worst-case
+   overlap upper bounds for truncated tables; near-miss reporting; a
+   per-finalist manual verification checklist.
 
 ## How to run
 
@@ -53,10 +60,20 @@ python selection/mf_recommend.py --selftest        # must print SELFTEST PASS
 
 # 2) run on the real snapshot
 python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+#    add --exclude 'Fund Name' (repeatable) after a Stage 3 FAIL to rebuild
+#    the portfolio under full constraints (closed loop)
 
 # 3) unit tests
 python -m pytest tests/test_mf_recommend.py -v
 ```
+
+**This is Stage 2 of a 5-stage pipeline** (README "Quick guide"). The picks
+are NOT final until Stage 3 (`selection/nav_rolling_check.py`) verifies them
+against full NAV history — a top-scored pick can still FAIL the rolling gate
+(the snapshot cannot see path-dependence). For the full verified
+recommend → verify → allocate loop, use the **mf-portfolio-loop agent**
+(`.claude/agents/mf-portfolio-loop.md`), which encodes the exclusion-rebuild
+procedure and the structural selection heuristics.
 
 Config overrides go in a JSON file passed via `--config` (deep-merged onto
 `DEFAULT_CONFIG` in the module — gates, weights, buckets, quotas, overlap cap).
@@ -81,8 +98,12 @@ same analysis to the user in the chat response.
   `ranking` (every universe fund with metrics + per-gate checks),
   `excluded_by_gates` (with the exact failed checks),
   `recommendations` (picks with score, bucket and `recommendation_reason`),
-  `selection_decisions`, `overlap_matrix_pct`, `notes_and_caveats`, and a
-  manifest (`engine_version`, `config_hash`, `input_hashes` per house file,
+  `bench` (pre-validated substitutes per pick), `near_misses`,
+  `selection_decisions` (including `excluded_by_config` for --exclude'd
+  funds), `overlap_matrix_pct` + `overlap_upper_bound_pct` +
+  `overlap_uncertain_pairs`, `holdings_coverage`,
+  `manual_verification_note`, `notes_and_caveats`, and a manifest
+  (`engine_version`, `config_hash`, `input_hashes` per house file,
   `run_hash`, `generated_at`).
 - `ms_data/recommendation_run/recommendations.md` — human-readable summary.
 - `ms_data/recommendation_run/model_judgment.md` — the model-judgment layer

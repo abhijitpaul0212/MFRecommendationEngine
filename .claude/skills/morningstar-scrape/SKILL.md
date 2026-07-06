@@ -67,6 +67,16 @@ python scraper/morningstar_fund_details.py --out ms_data --headless \
 python scraper/morningstar_fund_details.py --out ms_data --headless --workers 6 \
     --all --direct-growth-only --refresh-days 30
 
+# MODE 3b — RECOMMENDATION-PIPELINE feed (the README quick-guide Stage 1
+#           command): also skips categories outside the engine's four
+#           buckets (--recommendation-universe-only; a drift-guard test pins
+#           the allow-list to the engine's buckets) and skips the Bond/Other
+#           holdings tabs (--equity-holdings-only) — the engine only reads
+#           equity holdings:
+python scraper/morningstar_fund_details.py --out ms_data --headless --workers 2 \
+    --all --direct-growth-only --equity-holdings-only \
+    --recommendation-universe-only --refresh-days 30
+
 # unit tests (no browser needed)
 python -m pytest tests/test_morningstar_parse.py tests/test_fund_details_parse.py -v
 ```

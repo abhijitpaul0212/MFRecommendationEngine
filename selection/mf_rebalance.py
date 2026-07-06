@@ -11,14 +11,21 @@ Position in the process (README quick guide):
 
 Two independent families of trigger, mirroring how the money was invested:
 
-1. DRIFT (arithmetic vs the buy-time plan) — the classic 5/25 rule:
-   a fund breaches when its current weight is off target by more than
-   --drift-pp absolute percentage points (default 5) OR by more than
-   --drift-rel percent of its target (default 25%). Current values are
-   derived from NAV history (units = invested amount / NAV on the buy date;
-   value = units x latest NAV — every number shown in the output), or
-   supplied exactly with --current 'Fund=value' when you bought on different
-   dates / in tranches.
+1. DRIFT (arithmetic vs the buy-time plan) — the classic 5/25 rule: a fund
+   breaches when its current weight is off target by more than --drift-pp
+   absolute percentage points (default 5) OR by more than --drift-rel
+   percent of its target (default 25%). Current values are derived
+   FREQUENCY-AWARE from the plan's own contract (allocation_plan.json
+   records whether it was a LUMPSUM or a recurring SIP):
+     - lumpsum: units = amount / NAV on the buy date; value = units x latest
+       NAV (wrong for a SIP — many purchase dates, many NAVs);
+     - sip: the plan's sip_day + sip_start_date are replayed into every
+       monthly installment date through today, each priced at ITS OWN NAV,
+       and units are summed — the correct SIP valuation;
+   or supplied exactly with --current 'Fund=value' (you know the value
+   better than any derivation), or precisely with --transactions FILE for
+   irregular SIPs (missed/changed installments) or a lumpsum top-up mixed
+   into a SIP — every number shown in the output either way.
 
 2. QUALITY (the same machinery the initial investment went through):
    - fresh Stage 2 gates: a held fund now in `excluded_by_gates` of the NEW
@@ -57,7 +64,9 @@ Usage
       --plan ms_data/recommendation_run/allocation_plan.json \
       --report ms_data/recommendation_run/recommendations.json \
       --data ms_data
-  # options: --buy-date 2026-07-07  --current 'Fund Name=1234567' (repeatable)
+  # options: --buy-date 2026-07-07  --sip-day 5  --as-of 2026-07-01
+  #          --current 'Fund Name=1234567' (repeatable)
+  #          --transactions purchases.json
   #          --new-money 200000  --drift-pp 5 --drift-rel 25
   #          --map 'Fund Name=schemeCode'  --skip-rolling  --out DIR
 
@@ -68,6 +77,7 @@ mf_recommend so no threshold or formula exists twice.
 from __future__ import annotations
 
 import argparse
+import calendar
 import glob
 import json
 import os
@@ -100,9 +110,11 @@ def nav_on_or_before(series, d):
 
 
 def derive_current_value(amount_inr, series, buy_date):
-    """Buy-time amount -> today's value via units held. Returns the full
-    derivation {units, nav_buy(+date), nav_now(+date), current_value} or None
-    when the series can't support it — never guesses."""
+    """LUMPSUM: one buy-time amount -> today's value via units held. Returns
+    the full derivation {units, nav_buy(+date), nav_now(+date),
+    current_value} or None when the series can't support it — never guesses.
+    Wrong for a SIP (many purchase dates, many NAVs) — see
+    derive_value_from_transactions / sip_installment_dates for that case."""
     if not series:
         return None
     buy = nav_on_or_before(series, buy_date)
@@ -115,6 +127,96 @@ def derive_current_value(amount_inr, series, buy_date):
             "nav_buy_date": nav_buy_date.isoformat(),
             "nav_now": nav_now, "nav_now_date": nav_now_date.isoformat(),
             "current_value": int(round(units * nav_now))}
+
+
+def sip_installment_dates(start, as_of, day):
+    """One date per calendar month from `start` through `as_of`, clamped to
+    `day` (or the month's last day if shorter, e.g. day=31 in February) —
+    the same clamping a real SIP mandate uses. Only dates >= start and
+    <= as_of are returned. Deterministic; day should be validated by the
+    caller to 1-28 to sidestep short-month ambiguity."""
+    if start > as_of:
+        return []
+    dates = []
+    y, m = start.year, start.month
+    while True:
+        last = calendar.monthrange(y, m)[1]
+        d = date(y, m, min(day, last))
+        if d > as_of:
+            break
+        if d >= start:
+            dates.append(d)
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return dates
+
+
+def derive_value_from_transactions(transactions, series):
+    """GENERAL CASE (SIP, staggered lumpsum, top-ups): sums units bought at
+    the NAV on-or-before EACH transaction's own date, then values the total
+    at today's NAV. transactions: [(date, amount)] in any order. Returns the
+    full derivation (units, nav_now(+date), current_value, total_invested,
+    installment count, per-transaction breakdown) or None if the series is
+    empty or ANY transaction predates the earliest available NAV — never
+    guesses a price for money that couldn't have bought units yet."""
+    if not series or not transactions:
+        return None
+    total_units, breakdown = 0.0, []
+    for d, amt in sorted(transactions):
+        hit = nav_on_or_before(series, d)
+        if hit is None or hit[1] <= 0:
+            return None
+        nav_date, nav = hit
+        units = amt / nav
+        total_units += units
+        breakdown.append({"date": d.isoformat(), "amount": amt, "nav": nav,
+                          "nav_date": nav_date.isoformat(), "units": r6(units)})
+    nav_now_date, nav_now = series[-1]
+    return {"units": r6(total_units), "nav_now": nav_now,
+            "nav_now_date": nav_now_date.isoformat(),
+            "current_value": int(round(total_units * nav_now)),
+            "total_invested": sum(a for _, a in transactions),
+            "installments": len(transactions), "transactions": breakdown}
+
+
+def resolve_fund_value(plan_amount, frequency, sip_day, anchor_date, today,
+                       series, current_override=None, txn_override=None):
+    """The single decision point for 'what is this fund worth today',
+    honoring the SAME priority for every fund: an exact --current override
+    always wins (you know better than any derivation); a --transactions
+    override covers irregular/staggered/topped-up cases (SIP that changed
+    amount, missed a month, or mixed with a lumpsum top-up) precisely;
+    otherwise the plan's OWN contract is replayed automatically — its SIP
+    schedule (frequency='sip') or its single buy date (frequency='lumpsum').
+    Returns the derivation dict (with a 'method' tag) or None -> caller
+    reports INCONCLUSIVE rather than guessing. Pure: series is already
+    downloaded, today is passed in, no network/clock access here."""
+    if current_override is not None:
+        return {"current_value": current_override,
+                "derivation": "user --current override", "method": "override"}
+    if txn_override is not None:
+        d = derive_value_from_transactions(txn_override, series)
+        if d is not None:
+            d["method"] = "transactions"
+        return d
+    if frequency == "sip":
+        if sip_day is None or anchor_date is None:
+            return None
+        dates = sip_installment_dates(anchor_date, today, sip_day)
+        if not dates:
+            return None
+        d = derive_value_from_transactions(
+            [(dt, plan_amount) for dt in dates], series)
+        if d is not None:
+            d["method"] = "sip_auto"
+        return d
+    if anchor_date is None:
+        return None
+    d = derive_current_value(plan_amount, series, anchor_date)
+    if d is not None:
+        d["method"] = "lumpsum_auto"
+    return d
 
 
 def compute_drift(targets_pct, current_values, pp_thr, rel_thr):
@@ -288,12 +390,28 @@ def main():
     ap.add_argument("--data", default="ms_data",
                     help="fresh scrape dir, for held-fund overlap re-check")
     ap.add_argument("--buy-date",
-                    help="YYYY-MM-DD the plan was executed (default: the "
-                         "plan's generated_at date)")
+                    help="anchor date override: the lumpsum buy date, OR the "
+                         "SIP first-installment date (default: read from the "
+                         "plan — its own generated_at date for lumpsum, or "
+                         "its recorded sip_start_date for SIP)")
+    ap.add_argument("--sip-day", type=int,
+                    help="SIP debit day override (default: the plan's "
+                         "recorded sip_day; ignored for lumpsum plans)")
+    ap.add_argument("--as-of",
+                    help="YYYY-MM-DD to audit as of (default: today) — also "
+                         "the last date SIP installments are counted through")
     ap.add_argument("--current", action="append", default=[],
                     metavar="'Fund Name=rupees'",
-                    help="exact current value override (repeatable) — use for "
-                         "tranche/SIP purchases where NAV derivation is wrong")
+                    help="exact current value override (repeatable) — highest "
+                         "priority; use when you know the real value better "
+                         "than any derivation")
+    ap.add_argument("--transactions",
+                    help="JSON file {fund: [{\"date\":\"YYYY-MM-DD\", "
+                         "\"amount\":N}, ...]} of ACTUAL purchase dates/"
+                         "amounts per fund — the precise fix for an "
+                         "irregular SIP (missed/changed installments) or a "
+                         "lumpsum top-up mixed into a SIP; overrides the "
+                         "plan's auto-reconstructed schedule for listed funds")
     ap.add_argument("--new-money", type=int, default=0,
                     help="fresh amount to add; rebalance targets are computed "
                          "over (current + new) so large-enough N gives a "
@@ -320,11 +438,21 @@ def main():
     rows = plan["allocation"]
     held = [r["fund"] for r in rows]
     targets = {r["fund"]: r["pct"] for r in rows}
-    buy_date = (date.fromisoformat(args.buy_date) if args.buy_date
-                else datetime.fromisoformat(plan["generated_at"]).date())
-    today = datetime.now(timezone.utc).date()
+    pinputs = plan.get("inputs") or {}
+    frequency = pinputs.get("frequency", "lumpsum")   # old plans lack this
+    sip_day = args.sip_day if args.sip_day is not None else pinputs.get("sip_day")
+    if args.buy_date:
+        anchor_date = date.fromisoformat(args.buy_date)
+    elif frequency == "sip" and pinputs.get("sip_start_date"):
+        anchor_date = date.fromisoformat(pinputs["sip_start_date"])
+    elif frequency == "lumpsum":
+        anchor_date = datetime.fromisoformat(plan["generated_at"]).date()
+    else:
+        anchor_date = None      # SIP plan missing its own schedule
+    today = (date.fromisoformat(args.as_of) if args.as_of
+             else datetime.now(timezone.utc).date())
 
-    overrides, mapov = {}, {}
+    overrides, mapov, txn_overrides = {}, {}, {}
     for item, dest, what in ((args.current, overrides, "--current"),
                              (args.map, mapov, "--map")):
         for m in item:
@@ -333,6 +461,12 @@ def main():
                 ap.error(f"{what} needs 'Fund Name=value', got: {m!r}")
             dest[name.strip()] = val.strip()
     overrides = {k: int(v) for k, v in overrides.items()}
+    if args.transactions:
+        with open(args.transactions, encoding="utf-8") as f:
+            raw_txns = json.load(f)
+        for fund, items in raw_txns.items():
+            txn_overrides[fund] = [(date.fromisoformat(t["date"]), t["amount"])
+                                   for t in items]
 
     # per-fund NAV series: one download serves BOTH the value derivation and
     # the rolling re-check
@@ -349,24 +483,38 @@ def main():
                 series = nrc.parse_mfapi_history(payload)
             if not args.skip_rolling:
                 rolling[f] = res["verdict"]
-        if f in overrides:
-            current_values[f] = overrides[f]
-            derivations[f] = {"current_value": overrides[f],
-                              "derivation": "user --current override"}
-        else:
-            d = derive_current_value(r["amount_inr"], series, buy_date)
-            if d is None:
-                print(f"INCONCLUSIVE: cannot derive current value for "
-                      f"'{f}' ({meta.get('note') or 'no NAV series'}) — "
-                      f"supply --current '{f}=<value>'", flush=True)
-                return 1
-            current_values[f] = d["current_value"]
-            derivations[f] = {**d, "derivation":
-                              f"units = ₹{r['amount_inr']:,} / NAV "
-                              f"{d['nav_buy']} on {d['nav_buy_date']}"}
+        d = resolve_fund_value(
+            r["amount_inr"], frequency, sip_day, anchor_date, today, series,
+            current_override=overrides.get(f), txn_override=txn_overrides.get(f))
+        if d is None:
+            hint = ("plan has no recorded SIP schedule (sip_day/"
+                    "sip_start_date) — pass --sip-day and --buy-date"
+                    if frequency == "sip" and (sip_day is None or anchor_date is None)
+                    else meta.get("note") or "no NAV series")
+            print(f"INCONCLUSIVE: cannot derive current value for "
+                  f"'{f}' ({hint}) — supply --current '{f}=<value>' or "
+                  f"--transactions", flush=True)
+            return 1
+        current_values[f] = d["current_value"]
+        if "derivation" not in d:
+            d["derivation"] = (
+                f"SIP: {d.get('installments')} installment(s) of "
+                f"₹{r['amount_inr']:,} from {anchor_date} on day {sip_day}"
+                if d.get("method") == "sip_auto" else
+                f"units = ₹{r['amount_inr']:,} / NAV {d.get('nav_buy')} on "
+                f"{d.get('nav_buy_date')}" if d.get("method") == "lumpsum_auto"
+                else f"{d.get('installments')} dated transaction(s) "
+                     f"totalling ₹{d.get('total_invested', 0):,}")
+        derivations[f] = d
     if args.skip_rolling:
         warnings.append("rolling re-check skipped (--skip-rolling) — quality "
                         "verdicts rest on fresh gates only")
+    if frequency == "sip":
+        warnings.append(
+            "this portfolio is SIP-funded: for a REBALANCE_REQUIRED verdict, "
+            "consider adjusting the NEXT installment's fund-wise split "
+            "toward the target percentages instead of an immediate lump-sum "
+            "buy/sell — the trades below are the immediate one-time alternative")
 
     drift_rows = compute_drift(targets, current_values,
                                args.drift_pp, args.drift_rel)
@@ -392,7 +540,10 @@ def main():
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "verdict": verdict,
-        "inputs": {"buy_date": buy_date.isoformat(),
+        "inputs": {"frequency": frequency,
+                   "anchor_date": anchor_date.isoformat() if anchor_date else None,
+                   "sip_day": sip_day if frequency == "sip" else None,
+                   "as_of": today.isoformat(),
                    "drift_pp_threshold": args.drift_pp,
                    "drift_rel_threshold_pct": args.drift_rel,
                    "new_money_inr": args.new_money,
@@ -415,9 +566,11 @@ def main():
     with open(jpath, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, sort_keys=True, ensure_ascii=False)
 
+    schedule_label = (f"SIP day {sip_day} from {anchor_date}" if frequency == "sip"
+                      else f"buy date {anchor_date}")
     lines = ["# Rebalancing Audit", "",
-             f"**Verdict: {verdict}**  (buy date {buy_date}, thresholds "
-             f"{args.drift_pp}pp / {args.drift_rel}%)", ""]
+             f"**Verdict: {verdict}**  ({frequency}, {schedule_label}, "
+             f"thresholds {args.drift_pp}pp / {args.drift_rel}%)", ""]
     for row in drift_rows:
         a = actions[row["fund"]]
         lines += [f"## {a['action']} — {row['fund']}",

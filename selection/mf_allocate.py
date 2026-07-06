@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 mf_allocate.py — STAGE 4: turn the verified finalists into an exact
-investment breakdown (percent + rupee amount per fund) from three manual
-inputs: total amount, risk appetite, and investment duration.
+investment breakdown (percent + amount per fund) from three manual inputs:
+total amount, risk appetite, and investment duration. Supports both a
+one-time LUMPSUM and a recurring monthly SIP (--frequency) — the bucket
+weighting math is identical either way; only the amount's meaning and the
+plan's recorded schedule differ, and Stage 5 reads that schedule back to
+value a SIP portfolio correctly (see mf_rebalance.py).
 
 Position in the process (README quick guide):
   Stage 2 recommendations.json -> Stage 3 nav_rolling_check.json -> THIS
@@ -33,13 +37,22 @@ Design contract (same ethos as the engines):
     rupee-exact splits.
 
 Inputs (prompted interactively when flags are omitted):
-  --amount 1000000          total to invest, in rupees
+  --amount 1000000          lumpsum total, OR the monthly SIP installment
+                            amount when --frequency sip — in rupees
   --risk moderate           conservative | moderate | aggressive
   --years 15                intended holding duration in years
+  --frequency lumpsum|sip   default lumpsum
+  --sip-day 5, --start-date 2026-07-05   SIP only: the recurring debit day
+                            (1-28, avoids short-month ambiguity) and the
+                            first installment date. Recorded in the plan so
+                            Stage 5 can reconstruct every installment.
 
 Usage:
   python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
-      --amount 1000000 --risk moderate --years 15
+      --amount 1000000 --risk moderate --years 15                    # lumpsum
+  python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+      --amount 25000 --risk moderate --years 15 \
+      --frequency sip --sip-day 5 --start-date 2026-07-05             # SIP
 
 Stdlib only. Not investment advice — arithmetic over your own inputs.
 """
@@ -51,15 +64,17 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mf_select import r6, sha256_obj  # noqa: E402
 
 RISK_PROFILES = ("conservative", "moderate", "aggressive")
 HORIZON_BANDS = ("5-10y", "10-15y", "15y+")
+FREQUENCIES = ("lumpsum", "sip")
 MIN_YEARS = 5                  # below this an all-equity plan is refused
 CONCENTRATION_WARN_PCT = 40.0  # any single fund above this draws a warning
+MIN_SIP_DAY, MAX_SIP_DAY = 1, 28   # avoids short-month ambiguity (Feb 29-31)
 
 # Explicit (risk x horizon) -> bucket weights, each row summing to 100.
 # A LOOKUP TABLE, deliberately: no formulaic tilts to reverse-engineer. Logic
@@ -253,11 +268,15 @@ def stage3_blockers(picks, nav_results, allow_failed=False):
 # ---------------------------------------------------------------------------
 
 def _prompt_missing(args):
-    """Interactive fallback for the three manual inputs — Stage 4 is the one
-    stage designed to ask the human. Loops until each answer parses."""
+    """Interactive fallback for the manual inputs — Stage 4 is the one stage
+    designed to ask the human. Loops until each answer parses. --frequency
+    defaults to lumpsum via argparse, so existing lumpsum callers see no new
+    prompts; SIP's extra two questions only fire when --frequency sip is set."""
+    label = ("Monthly SIP installment amount" if args.frequency == "sip"
+             else "Total amount to invest")
     while args.amount is None:
         try:
-            v = int(input("Total amount to invest (INR, e.g. 1000000): ")
+            v = int(input(f"{label} (INR, e.g. 1000000): ")
                     .replace(",", "").strip())
             args.amount = v if v > 0 else None
         except (ValueError, EOFError):
@@ -273,6 +292,31 @@ def _prompt_missing(args):
                                .strip())
         except (ValueError, EOFError):
             print("  enter a number of years", flush=True)
+    if args.frequency == "sip":
+        while args.start_date is None:
+            v = input("First SIP installment date (YYYY-MM-DD) "
+                      "[today]: ").strip()
+            if not v:
+                args.start_date = datetime.now(timezone.utc).date().isoformat()
+                break
+            try:
+                date.fromisoformat(v)
+                args.start_date = v
+            except ValueError:
+                print("  use YYYY-MM-DD", flush=True)
+        while args.sip_day is None:
+            v = input(f"SIP debit day of month [{date.fromisoformat(args.start_date).day}]: ").strip()
+            if not v:
+                args.sip_day = min(date.fromisoformat(args.start_date).day, MAX_SIP_DAY)
+                break
+            try:
+                d = int(v)
+                args.sip_day = d if MIN_SIP_DAY <= d <= MAX_SIP_DAY else None
+            except ValueError:
+                args.sip_day = None
+            if args.sip_day is None:
+                print(f"  enter a day between {MIN_SIP_DAY} and {MAX_SIP_DAY}",
+                      flush=True)
 
 
 def main():
@@ -284,14 +328,26 @@ def main():
     ap.add_argument("--nav-check",
                     help="nav_rolling_check.json from Stage 3 (default: the "
                          "file next to the report, if present)")
+    ap.add_argument("--frequency", choices=FREQUENCIES, default="lumpsum",
+                    help="'lumpsum' (one-time) or 'sip' (recurring monthly) "
+                         "— default lumpsum")
     ap.add_argument("--amount", type=int,
-                    help="total amount to invest in whole rupees (prompted "
-                         "when omitted)")
+                    help="lumpsum total, OR the monthly SIP installment "
+                         "amount when --frequency sip, in whole rupees "
+                         "(prompted when omitted)")
     ap.add_argument("--risk", choices=RISK_PROFILES,
                     help="risk appetite (prompted when omitted)")
     ap.add_argument("--years", type=float,
                     help="intended holding duration in years (prompted when "
                          "omitted)")
+    ap.add_argument("--sip-day", type=int,
+                    help=f"SIP only: recurring debit day of month "
+                         f"({MIN_SIP_DAY}-{MAX_SIP_DAY}, avoids short-month "
+                         f"ambiguity); prompted when omitted with --frequency sip")
+    ap.add_argument("--start-date",
+                    help="SIP only: first installment date YYYY-MM-DD "
+                         "(default: today); recorded in the plan so Stage 5 "
+                         "can reconstruct every installment")
     ap.add_argument("--step", type=int, default=1000,
                     help="amount granularity in rupees (default 1000): every "
                          "figure is a multiple of this, practical to place as "
@@ -305,6 +361,17 @@ def main():
                     help="output dir for allocation_plan.json/.md "
                          "(default: the report's dir)")
     args = ap.parse_args()
+    if args.frequency == "sip" and args.sip_day is not None \
+            and not (MIN_SIP_DAY <= args.sip_day <= MAX_SIP_DAY):
+        ap.error(f"--sip-day must be between {MIN_SIP_DAY} and {MAX_SIP_DAY} "
+                 f"(avoids short-month ambiguity)")
+    if args.start_date:
+        try:
+            date.fromisoformat(args.start_date)
+        except ValueError:
+            ap.error(f"--start-date must be YYYY-MM-DD, got {args.start_date!r}")
+    if args.frequency == "lumpsum" and (args.sip_day or args.start_date):
+        ap.error("--sip-day / --start-date apply only to --frequency sip")
     _prompt_missing(args)
 
     with open(args.report, encoding="utf-8") as f:
@@ -336,12 +403,16 @@ def main():
 
     out_dir = args.out or os.path.dirname(os.path.abspath(args.report))
     os.makedirs(out_dir, exist_ok=True)
+    inputs = {"frequency": args.frequency, "amount_inr": args.amount,
+              "risk": args.risk, "duration_years": args.years,
+              "horizon_band": plan["band"],
+              "amount_step_inr": max(1, args.step)}
+    if args.frequency == "sip":
+        inputs["sip_day"] = args.sip_day
+        inputs["sip_start_date"] = args.start_date
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "inputs": {"amount_inr": args.amount, "risk": args.risk,
-                   "duration_years": args.years,
-                   "horizon_band": plan["band"],
-                   "amount_step_inr": max(1, args.step)},
+        "inputs": inputs,
         "bucket_weights_used": plan["weights_used"],
         "allocation": plan["rows"],
         "warnings": plan["warnings"],
@@ -349,9 +420,15 @@ def main():
         "note": ("Deterministic arithmetic over your own inputs — not "
                  "investment advice. Weights come from the explicit "
                  "risk x horizon template table in mf_allocate.py; amounts "
-                 "sum exactly to the input. Review the per-fund manual "
-                 "verification checklist in recommendations.md before "
-                 "placing orders, and rebalance ~annually."),
+                 "sum exactly to the input" + (
+                 f" (each fund's amount is its RECURRING monthly SIP "
+                 f"installment, debited on day {args.sip_day} of each "
+                 f"month starting {args.start_date} — Stage 5 reconstructs "
+                 f"the full installment history from this contract)"
+                 if args.frequency == "sip" else "") + ". Review the "
+                 "per-fund manual verification checklist in "
+                 "recommendations.md before placing orders, and rebalance "
+                 "~annually."),
     }
     out["plan_hash"] = sha256_obj({k: v for k, v in out.items()
                                    if k != "generated_at"})
@@ -359,12 +436,16 @@ def main():
     with open(jpath, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, sort_keys=True, ensure_ascii=False)
 
+    amount_col = "Monthly SIP (₹)" if args.frequency == "sip" else "Amount (₹)"
+    amount_line = (f"₹{args.amount:,}/month via SIP (day {args.sip_day}, "
+                   f"starting {args.start_date})" if args.frequency == "sip"
+                   else f"₹{args.amount:,} lumpsum")
     lines = ["# Investment Allocation Plan", "",
-             f"- amount: ₹{args.amount:,}  |  risk: {args.risk}  |  "
+             f"- {amount_line}  |  risk: {args.risk}  |  "
              f"duration: {args.years:g}y (band {plan['band']})",
              f"- engine report: `{(rep.get('run_hash') or '')[:16]}…`  |  "
              f"plan_hash: `{out['plan_hash'][:16]}…`", "",
-             "| Fund | Bucket | % | Amount (₹) |", "|---|---|---|---|"]
+             f"| Fund | Bucket | % | {amount_col} |", "|---|---|---|---|"]
     for r in plan["rows"]:
         lines.append(f"| {r['fund']} | {r['bucket']} | {r['pct']} | "
                      f"{r['amount_inr']:,} |")
@@ -380,7 +461,7 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     print(f"Allocation ({args.risk}, {args.years:g}y -> band {plan['band']}, "
-          f"₹{args.amount:,}):", flush=True)
+          f"{amount_line}):", flush=True)
     for r in plan["rows"]:
         print(f"  {r['pct']:>6}%  ₹{r['amount_inr']:>12,}  {r['fund']} "
               f"({r['bucket']})", flush=True)

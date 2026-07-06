@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [Quick guide: end-to-end in four commands (+ periodic rebalance)](#quick-guide-end-to-end-in-four-commands--periodic-rebalance)
+  - [Skills & agents (optional Claude wrappers)](#skills--agents-optional-claude-wrappers-over-the-same-clis)
 - [The founding framework (manual process this repo automates)](#the-founding-framework-manual-process-this-repo-automates)
 - [End-to-end runbook (plain Python — no Claude required)](#end-to-end-runbook-plain-python--no-claude-required)
   - [Claude skills ↔ python scripts mapping](#claude-skills--python-scripts-mapping)
@@ -32,7 +33,7 @@
 - [Allocation planner: amount / risk / duration → exact breakdown](#allocation-planner-amount--risk--duration--exact-breakdown-mf_allocatepy)
 - [Rebalancing audit: drift + full quality re-check](#rebalancing-audit-drift--full-quality-re-check-mf_rebalancepy)
 - [Dormant alternate engine: NAV-based deterministic selection](#dormant-alternate-engine-nav-based-deterministic-selection-mf_selectpy)
-- [Claude skills](#claude-skills)
+- [Claude skills & agents](#claude-skills--agents)
 
 ## Quick guide: end-to-end in four commands (+ periodic rebalance)
 
@@ -134,13 +135,21 @@ and never fail the run. See
 | Argument | Default | What it does |
 |---|---|---|
 | `--report FILE` | (required) | `recommendations.json` from Stage 2 |
-| `--amount N` | prompted | total to invest, whole rupees |
+| `--frequency` | `lumpsum` | `lumpsum` (one-time) or `sip` (recurring monthly) — the bucket-weighting math is identical either way; only the amount's meaning and the recorded schedule differ |
+| `--amount N` | prompted | lumpsum total, OR the monthly SIP installment amount when `--frequency sip`, whole rupees |
 | `--risk PROFILE` | prompted | `conservative` \| `moderate` \| `aggressive` |
 | `--years N` | prompted | intended holding duration (refused under 5y — all-equity is wrong for short money) |
+| `--sip-day N` | prompted (SIP only) | recurring debit day of month, 1–28 (avoids short-month ambiguity) |
+| `--start-date YYYY-MM-DD` | today (SIP only) | first installment date — recorded in the plan so Stage 5 can reconstruct every installment |
 | `--nav-check FILE` | auto-detected next to the report | Stage 3 verdicts; a pick that FAILED **blocks** the plan |
 | `--step N` | `1000` | amount granularity in rupees — every figure is a multiple of this (order-friendly); `--step 1` for rupee-exact splits |
 | `--allow-failed` | off | downgrade the Stage 3 FAIL block to a recorded warning |
 | `--out DIR` | report's dir | writes `allocation_plan.json` + `allocation_plan.md` |
+
+SIP is opt-in: `--frequency` defaults to `lumpsum`, so existing commands and
+automation are unaffected. Passing `--frequency sip` without `--sip-day`/
+`--start-date` prompts for them; passing them with `--frequency lumpsum` is
+a usage error (they'd be silently ignored otherwise).
 
 Weights come from an explicit risk × horizon template table (9 rows, each
 summing to 100); unfilled buckets redistribute proportionally (warned, never
@@ -155,22 +164,51 @@ the plan). See
 
 | Argument | Default | What it does |
 |---|---|---|
-| `--plan FILE` | (required) | `allocation_plan.json` from Stage 4 — the buy-time contract |
+| `--plan FILE` | (required) | `allocation_plan.json` from Stage 4 — the buy-time contract, including its recorded `frequency` (lumpsum/sip) and SIP schedule |
 | `--report FILE` | (required) | **FRESH** `recommendations.json` (re-run Stages 1–2 first — quality is judged on today's snapshot) |
 | `--data DIR` | `ms_data` | fresh scrape dir, for the held-fund overlap re-check |
-| `--buy-date YYYY-MM-DD` | plan's date | when the plan was actually executed |
-| `--current 'Fund=rupees'` | NAV-derived | exact current value override (repeatable) — for SIP/tranche purchases |
+| `--buy-date YYYY-MM-DD` | read from the plan | anchor date override: the lumpsum buy date, OR the SIP first-installment date |
+| `--sip-day N` | read from the plan | SIP debit-day override (ignored for lumpsum plans) |
+| `--as-of YYYY-MM-DD` | today | audit as of this date — also the last date SIP installments are counted through |
+| `--current 'Fund=rupees'` | — | exact current value override (repeatable, highest priority) — use when you know the value better than any derivation |
+| `--transactions FILE` | — | JSON `{fund: [{"date":..,"amount":..}, ...]}` of ACTUAL purchase dates/amounts — the precise fix for an irregular SIP (missed/changed installments) or a lumpsum top-up mixed into a SIP |
 | `--new-money N` | `0` | rebalance by adding fresh cash; large enough N gives a pure-buy (no-sell, tax-friendlier) plan |
 | `--drift-pp N` / `--drift-rel N` | `5` / `25` | the 5/25 drift rule: breach when off target by >N pp absolute OR >N% of target |
 | `--map 'Fund Name=schemeCode'` | — | pin AMFI scheme codes (as in Stage 3) |
 | `--skip-rolling` | off | skip the live rolling re-check (faster; recorded as a warning) |
 | `--out DIR` | plan's dir | writes `rebalance_plan.json` + `rebalance_plan.md` |
 
-Verdicts: `HOLD` (exit 0) / `REBALANCE_REQUIRED` (exact buy/sell trades) /
-`REPLACEMENT_REQUIRED` (a held fund fails today's gates or rolling check —
-composition first, trades never computed) / `INCONCLUSIVE` (missing data
-blocks trades). Every verdict ships with its numbers and reasoning. See
+Current value is derived **frequency-aware**, straight from the plan's own
+contract: lumpsum replays a single buy date; SIP replays every monthly
+installment from `sip_start_date`/`sip_day` through `--as-of`, each priced
+at *that installment's own* historical NAV (never one NAV for the whole
+position — that's what the old single-date formula got wrong for a SIP).
+Priority per fund: `--current` (exact) > `--transactions` (dated purchases,
+for irregular SIPs or mixed top-ups) > the plan's automatic schedule.
+
+Verdicts: `HOLD` (exit 0) / `REBALANCE_REQUIRED` (exact buy/sell trades;
+SIP portfolios also get a note suggesting adjusting the *next installment's*
+split instead) / `REPLACEMENT_REQUIRED` (a held fund fails today's gates or
+rolling check — composition first, trades never computed) / `INCONCLUSIVE`
+(missing data blocks trades). Every verdict ships with its numbers and
+reasoning. See
 [Rebalancing audit](#rebalancing-audit-drift--full-quality-re-check-mf_rebalancepy).
+
+### Skills & agents (optional Claude wrappers over the same CLIs)
+
+Every stage above is plain Python — cron-able, zero token cost. For
+Claude-supervised runs the repo ships project skills and an agent
+(details: [.claude/skills/README.md](.claude/skills/README.md)):
+
+| Wrapper | Drives | Adds on top of the bare CLI |
+|---|---|---|
+| `/morningstar-scrape` skill | Stage 1 | supervises the run, validates manifest/output, retries failures |
+| `/mf-recommend` skill | Stage 2 | writes the `model_judgment.md` interpretation layer |
+| **`mf-portfolio-loop` agent** | Stages 2→3→4 as a closed loop | on a Stage 3 pick FAIL, feeds the fund back via `--exclude` and rebuilds until every pick passes, then allocates (lumpsum or SIP); encodes the structural selection heuristics (blended core collapses the growth bucket; diversifier is unfillable next to a large-cap core; UNRESOLVED = retry) and cites the `run_hash → nav verdicts → plan_hash` chain in its conclusion |
+
+The agent never hand-patches picks or plans — every action it takes is one of
+the deterministic CLIs above, so its conclusions inherit the same
+reproducibility contract. Stage 5 stays a direct CLI run.
 
 ## The founding framework (manual process this repo automates)
 
@@ -325,10 +363,15 @@ python selection/nav_rolling_check.py --report ms_data/recommendation_run/recomm
 
 # STAGE 4 — ALLOCATION PLANNER (offline; the one stage that asks the human).
 # Inputs: total amount + risk appetite + duration (flags or interactive
-# prompts). Output: exact % and ₹ per fund, from an explicit risk x horizon
-# template table -> allocation_plan.json + allocation_plan.md.
+# prompts). Output: exact % and amount per fund, from an explicit risk x
+# horizon template table -> allocation_plan.json + allocation_plan.md.
 python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
-    --amount 1000000 --risk moderate --years 15
+    --amount 1000000 --risk moderate --years 15                        # lumpsum
+# --frequency sip: --amount becomes the MONTHLY installment; --sip-day and
+# --start-date are recorded in the plan as the SIP contract Stage 5 replays:
+python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+    --amount 25000 --risk moderate --years 15 \
+    --frequency sip --sip-day 5 --start-date 2026-07-05                # SIP
 # Honest guards: refuses durations under 5y (all-equity is wrong for short
 # money); a pick that FAILED Stage 3 BLOCKS the plan (--allow-failed records
 # an override warning instead); unfilled buckets redistribute with a warning;
@@ -338,9 +381,14 @@ python selection/mf_allocate.py --report ms_data/recommendation_run/recommendati
 # Re-run Stages 1-2 first for a FRESH snapshot, then:
 python selection/mf_rebalance.py --plan ms_data/recommendation_run/allocation_plan.json \
     --report ms_data/recommendation_run/recommendations.json --data ms_data
+# Reads the plan's own frequency/schedule automatically — lumpsum replays a
+# single buy date; SIP replays every monthly installment (sip_day +
+# sip_start_date) through today, each priced at ITS OWN historical NAV.
+# --transactions FILE covers an irregular SIP (missed/changed installments,
+# a lumpsum top-up mixed in) with the ACTUAL dated purchases instead.
 # Audits the live portfolio on TWO independent trigger families:
-#   DRIFT   — the 5/25 rule vs the buy-time plan (current values derived from
-#             NAV history with the derivation shown, or --current overrides)
+#   DRIFT   — the 5/25 rule vs the buy-time plan (current values derived
+#             frequency-aware as above, or --current/--transactions overrides)
 #   QUALITY — the SAME machinery the money was invested through: fresh Stage 2
 #             gates, live Stage 3 rolling re-check, held-fund overlap
 # Quality outranks arithmetic: a fund failing today's gates/rolling check
@@ -365,16 +413,18 @@ which command*.)
 
 ### Claude skills ↔ python scripts mapping
 
-| Claude skill (optional) | Runs exactly | When to prefer which |
+| Claude wrapper (optional) | Runs exactly | When to prefer which |
 |---|---|---|
-| `/morningstar-scrape` | Stage 1 above | skill: Claude supervises, validates output, retries failures; script: zero token cost, cron-able |
-| `/mf-recommend` | Stage 2 above + writes `model_judgment.md` | skill adds the model-judgment layer (interpretation, conviction, flags); script alone gives you everything deterministic |
+| `/morningstar-scrape` skill | Stage 1 above | skill: Claude supervises, validates output, retries failures; script: zero token cost, cron-able |
+| `/mf-recommend` skill | Stage 2 above + writes `model_judgment.md` | skill adds the model-judgment layer (interpretation, conviction, flags); script alone gives you everything deterministic |
+| `mf-portfolio-loop` agent | Stages 2→3→4 in a closed loop | agent: automates the exclude-rebuild iteration after Stage 3 FAILs, applies the structural selection heuristics, hands back a verified allocation with the full hash chain; scripts: run each stage by hand as in the quick guide |
 
-**Production guidance:** once stable, schedule the three python steps directly
-(cron/CI) — no Claude in the loop, no token spend. The single capability that
-genuinely requires a model is `model_judgment.md` (qualitative inference over
-`recommendations.json`); it is optional, additive, and can be invoked only
-when you want the interpretive layer refreshed.
+**Production guidance:** once stable, schedule the python steps directly
+(cron/CI) — no Claude in the loop, no token spend. The capabilities that
+genuinely use a model are `model_judgment.md` (qualitative inference over
+`recommendations.json`) and the closed-loop orchestration between Stage 3
+verdicts and Stage 2 exclusions; both are optional and additive — every
+underlying action remains a deterministic CLI.
 
 ## Data acquisition: the single canonical scraper
 
@@ -990,9 +1040,26 @@ isn't a multiple of the step, the sub-step residue is added to the largest
 allocation and noted in the plan. `--step 1` restores rupee-exact splits.
 
 ```bash
+# lumpsum (default)
 python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
     --amount 1000000 --risk moderate --years 15
+
+# SIP: --amount is the MONTHLY installment; --sip-day/--start-date become
+# part of the plan's contract so Stage 5 can reconstruct every installment
+python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+    --amount 25000 --risk moderate --years 15 \
+    --frequency sip --sip-day 5 --start-date 2026-07-05
 ```
+
+**Lumpsum and SIP share the identical bucket-weighting math** — a SIP is
+just the same split applied to a recurring monthly amount instead of a
+one-time total. The only difference is what the plan records: a SIP plan's
+`inputs` carries `frequency: "sip"`, `sip_day`, and `sip_start_date`, which
+[Stage 5](#rebalancing-audit-drift--full-quality-re-check-mf_rebalancepy)
+reads back to value a SIP-funded portfolio correctly (pricing each
+installment at *its own* historical NAV, not one NAV for the whole
+position). `--frequency` defaults to `lumpsum`, so nothing changes for
+existing commands.
 
 **How the split is decided — an explicit lookup table, not a formula.**
 Bucket weights come from a 3×3 template table (`ALLOCATION_TEMPLATES`:
@@ -1046,10 +1113,24 @@ python selection/mf_rebalance.py --plan ms_data/recommendation_run/allocation_pl
 rule: a fund breaches when its current weight is off target by more than
 5 percentage points absolute (`--drift-pp`) **or** 25% of its target weight
 (`--drift-rel` — this is what catches a small 5%-target sleeve quietly
-growing to 8%). Current values are derived transparently from NAV history —
-units = invested amount ÷ NAV on the buy date, value = units × latest NAV,
-every number recorded in `value_derivations` — or supplied exactly with
-`--current 'Fund=value'` for SIP/tranche purchases.
+growing to 8%).
+
+Current values are derived **frequency-aware**, replaying the plan's own
+contract (this is the fix for the earlier lumpsum-only limitation — a SIP
+has many purchase dates at many NAVs, and a single-date formula silently
+misvalues it):
+- **lumpsum**: units = invested amount ÷ NAV on the buy date, value = units
+  × latest NAV;
+- **sip**: the plan's `sip_day` + `sip_start_date` are replayed into every
+  monthly installment date through today (or `--as-of`), each priced at
+  *that installment's own* historical NAV, and the units summed;
+
+every number — per-installment NAV, date, units — is recorded in
+`value_derivations`. Two escape hatches, in priority order: `--current
+'Fund=value'` when you know the exact value better than any derivation
+(highest priority), or `--transactions FILE` (a JSON map of each fund's
+actual dated purchases) for an irregular SIP — a missed month, a changed
+installment amount, or a lumpsum top-up mixed into an otherwise-regular SIP.
 
 **Trigger family 2 — QUALITY (the same process as the initial investment):**
 - **fresh Stage 2 gates** — a held fund now in the new report's
@@ -1066,7 +1147,7 @@ every number recorded in `value_derivations` — or supplied exactly with
 | Verdict | Meaning | What you get |
 |---|---|---|
 | `HOLD` (exit 0) | within thresholds, quality intact | the reasons why nothing needs doing |
-| `REBALANCE_REQUIRED` | quality intact, drift breached | exact whole-rupee BUY/SELL per fund restoring plan weights; with `--new-money N` targets include the fresh cash — large enough N gives a pure-buy plan (no sells → no capital gains realised; the sells case carries an explicit STCG/LTCG warning) |
+| `REBALANCE_REQUIRED` | quality intact, drift breached | exact whole-rupee BUY/SELL per fund restoring plan weights; with `--new-money N` targets include the fresh cash — large enough N gives a pure-buy plan (no sells → no capital gains realised; the sells case carries an explicit STCG/LTCG warning). For a SIP-funded portfolio the output also suggests adjusting the *next installment's* fund-wise split toward the target weights as a no-transaction alternative to the trades below |
 | `REPLACEMENT_REQUIRED` | a held fund fails today's gates or rolling check | **no trades computed** — composition first: the output lists the exact engine loop (Stage 2 `--exclude 'failed fund'` → 3 → 4 on the proceeds → re-run Stage 5) |
 | `INCONCLUSIVE` | a held fund is missing from the fresh snapshot | blocked until rescraped — missing data is never papered over |
 
@@ -1149,11 +1230,16 @@ freeze a snapshot for repeatable audits.
   cannot be computed and the framework falls back to one-fund-per-category /
   one-per-AMC and says so — it never silently claims "<10% overlap".
 
-## Claude skills
+## Claude skills & agents
 
-Two project skills automate the workflow end-to-end (see
+Two project skills and one agent automate the workflow end-to-end (see
 [.claude/skills/README.md](.claude/skills/README.md)): `/morningstar-scrape`
-refreshes the data snapshot; `/mf-recommend` re-runs the engine on it —
+refreshes the data snapshot; `/mf-recommend` re-runs the engine on it; and
+the **`mf-portfolio-loop` agent** (`.claude/agents/mf-portfolio-loop.md`)
+drives the closed loop Stage 2 → Stage 3 → Stage 4 — excluding any pick that
+fails NAV verification and rebuilding until the portfolio passes, then
+allocating — with the settled structural heuristics from the 2026-07 build
+encoded so future runs start from the known route. All are
 designed so a future-dated re-run is reproducible and any change in output is
 attributable to data (`input_hashes`) or rules (`config_hash`), never chance. A live site is a changing input, so run-to-run identity is not
 promised — but the manifest hash lets any downstream framework run pin exactly which
