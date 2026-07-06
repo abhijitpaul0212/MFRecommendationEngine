@@ -68,7 +68,7 @@ from datetime import datetime, timezone
 
 from mf_select import pairwise_overlap, percentile_ranks, r6, sha256_file, sha256_obj
 
-ENGINE_VERSION = "1.2.0"
+ENGINE_VERSION = "1.4.0"
 
 NON_HOUSE_FILES = ("morningstar_factsheet.json", "filters.json")
 ALL_HORIZONS = ("3Y", "5Y", "10Y")
@@ -139,6 +139,26 @@ DEFAULT_CONFIG = {
         "max_funds_per_amc": 1,
         "max_funds_per_category": 1,
         "max_pairwise_overlap_pct": 10.0,
+        # Closed-loop exclusions (CLI --exclude): funds barred from SELECTION
+        # only — still ranked/scored for transparency, skipped with an
+        # 'excluded_by_config' decision. Use when a pick fails an external
+        # check (e.g. the Stage 3 NAV rolling-return verdict) so the engine
+        # rebuilds the whole portfolio under full constraints instead of a
+        # human hand-swapping one slot. Hashed into config_hash like any rule.
+        "exclude_funds": [],
+    },
+    # Reporting-only knobs. These NEVER touch the universe/gates/scoring/
+    # selection — they add diagnostics on top of an unchanged quality pipeline.
+    "reporting": {
+        # Funds that failed at most this many gates are listed in the
+        # `near_misses` watchlist with the margin by which each check missed.
+        # This gives visibility into close rejections WITHOUT ever relaxing a
+        # gate: a near-miss fund is still fully excluded from scoring/selection.
+        "near_miss_max_failed_gates": 1,
+        # Per pick, list up to this many PRE-VALIDATED substitutes (same
+        # bucket, no AMC/category/overlap conflict with the OTHER picks) in
+        # the report's `bench`. Reporting-only: never changes the selection.
+        "bench_alternates_per_pick": 2,
     },
 }
 
@@ -344,6 +364,65 @@ def equity_weights(fund):
     return w
 
 
+def holdings_coverage(fund):
+    """How much of a fund's equity portfolio the scrape actually captured.
+    Morningstar's public table caps at ~100 rows, so a fund with more holdings
+    than that is TRUNCATED — the overlap gate then sees only part of the book.
+
+    Returns {declared, scraped, scraped_weight_pct, truncated, unseen_weight_pct}.
+    `unseen_weight_pct` is 0 when the table is complete (a sub-100% weight sum
+    there is just cash/derivatives, which cannot overlap); when truncated it is
+    the portfolio weight NOT visible — the ceiling on hidden overlap."""
+    dp = fund.get("detailed_portfolio") or {}
+    summary = dp.get("holdings_summary") or {}
+    w = equity_weights(fund)
+    scraped = len(w)
+    scraped_weight = r6(sum(w.values())) if w else 0.0
+    declared = num(summary.get("Equity Holdings"))
+    truncated = declared is not None and scraped < int(declared)
+    unseen = r6(max(0.0, 100.0 - scraped_weight)) if truncated else 0.0
+    return {"declared": int(declared) if declared is not None else None,
+            "scraped": scraped, "scraped_weight_pct": scraped_weight,
+            "truncated": truncated, "unseen_weight_pct": unseen}
+
+
+def overlap_upper_bound(wa, wb, unseen_a, unseen_b):
+    """RIGOROUS worst-case pairwise overlap when one/both holdings tables are
+    truncated. pairwise_overlap(wa, wb) is only a LOWER bound: two funds could
+    each hide a tail that fully overlaps the other. The true overlap can exceed
+    the measured value by at most the two funds' combined undisclosed weight —
+    a bound that is tight (achievable when each fund's hidden tail is exactly
+    the other's disclosed names). Capped at 100. When both tables are complete
+    (unseen=0) this equals the measured overlap, so nothing changes for fully
+    scraped funds."""
+    measured = pairwise_overlap(wa, wb)
+    return r6(min(100.0, measured + max(0.0, unseen_a) + max(0.0, unseen_b)))
+
+
+def manual_verification_items(coverage):
+    """The checks Morningstar's public data CANNOT supply, so a human must do
+    them on the finalists before investing. Deterministic: same coverage in,
+    same checklist out. Sortino and manager-tenure are not scrapeable from the
+    public pages (see README reconciliation); the holdings-overlap item is
+    conditional on whether THIS fund's table was truncated."""
+    items = [
+        "Sortino ratio: confirm top-quartile vs category "
+        "(Value Research / Rupeevest / AMC factsheet) — engine uses Sharpe + "
+        "downside-capture only; Sortino is not on Morningstar's public pages.",
+        "Manager tenure: confirm the lead manager has run THIS scheme >=3y "
+        "(ideally 5y+ for a 10y horizon), or that the AMC runs a team/process "
+        "mandate rather than a star-manager one — not scrapeable, engine blind.",
+    ]
+    if coverage.get("truncated"):
+        items.append(
+            f"Full-holdings overlap: this fund's table is TRUNCATED "
+            f"({coverage['scraped']}/{coverage['declared']} holdings, "
+            f"{coverage['scraped_weight_pct']}% of weight visible). Re-check "
+            f"this fund's overlap against the other picks on a tool with the "
+            f"COMPLETE holdings sheet before trusting the <=10% result.")
+    return items
+
+
 def portfolio_quality(fund):
     """Weight-averaged Equity Star Rating of the scraped holdings — a proxy
     for the quality of what the manager actually owns."""
@@ -416,6 +495,32 @@ def build_reason(m, bucket, category):
     if quality:
         parts.append(", ".join(quality))
     return "; ".join(parts)
+
+
+def gate_display(check, m, bucket, g):
+    """(value, threshold) for a failed gate — the fund's metric and the exact
+    line it needed to clear — for the near-miss watchlist. Mirrors the
+    thresholds in apply_gates for READABILITY only; pass/fail truth and the
+    numeric margin are computed in apply_gates, never here."""
+    band = g["beta_band_by_bucket"].get(bucket, 1.15)
+    dcc, mddc = m.get("downside_capture_cat"), m.get("max_drawdown_cat")
+    table = {
+        "alpha_vs_category":            (m.get("alpha_excess"), g["alpha_vs_category_min_excess"]),
+        "sharpe_vs_category":           (m.get("sharpe_excess"), g["sharpe_vs_category_min_excess"]),
+        "sharpe_beats_risk_free":       (m.get("sharpe"), g["sharpe_min_absolute"]),
+        "r_squared_reliability":        (m.get("r_squared"), g["r_squared_min"]),
+        "beta_within_bucket_band":      (m.get("beta"), band),
+        "high_beta_alpha_compensation": (m.get("alpha_excess"), g["high_beta_alpha_compensation"]),
+        "downside_capture_cap":         (m.get("downside_capture"), g["downside_capture_absolute_max"]),
+        "downside_capture_vs_category": (
+            m.get("downside_capture"),
+            r6(dcc * g["downside_capture_vs_category_tolerance"]) if dcc is not None else None),
+        "drawdown_vs_category":         (
+            m.get("max_drawdown"),
+            r6(mddc * g["drawdown_vs_category_tolerance"]) if mddc is not None else None),
+        "data_complete":                (None, None),
+    }
+    return table.get(check, (None, None))
 
 
 # ----------------------------------------------------------------------------
@@ -559,8 +664,42 @@ class RecommendationEngine:
                 m["max_drawdown"] is not None and m["max_drawdown_cat"] is not None
                 and m["max_drawdown"]
                 >= m["max_drawdown_cat"] * g["drawdown_vs_category_tolerance"])
+            # Signed margin per check: >= 0 on the passing side, < 0 on the
+            # failing side; |margin| is the distance to the line. Diagnostic
+            # only — the booleans above remain the sole source of pass/fail
+            # truth. None where the input is missing or the check is a plain
+            # presence flag / not binding (high-beta comp when beta <= 1.0).
+            dc, dcc = m["downside_capture"], m["downside_capture_cat"]
+            mdd, mddc = m["max_drawdown"], m["max_drawdown_cat"]
+            hb_binds = (m["beta"] is not None and m["beta"] > g["high_beta_threshold"]
+                        and m["alpha_excess"] is not None)
+            margins = {
+                "data_complete": None,
+                "alpha_vs_category": (r6(m["alpha_excess"] - g["alpha_vs_category_min_excess"])
+                                      if m["alpha_excess"] is not None else None),
+                "sharpe_vs_category": (r6(m["sharpe_excess"] - g["sharpe_vs_category_min_excess"])
+                                       if m["sharpe_excess"] is not None else None),
+                "sharpe_beats_risk_free": (r6(m["sharpe"] - g["sharpe_min_absolute"])
+                                           if m["sharpe"] is not None else None),
+                "r_squared_reliability": (r6(m["r_squared"] - g["r_squared_min"])
+                                          if m["r_squared"] is not None else None),
+                "beta_within_bucket_band": (r6(band - m["beta"])
+                                            if m["beta"] is not None else None),
+                "high_beta_alpha_compensation": (
+                    r6(m["alpha_excess"] - g["high_beta_alpha_compensation"])
+                    if hb_binds else None),
+                "downside_capture_cap": (r6(g["downside_capture_absolute_max"] - dc)
+                                         if dc is not None else None),
+                "downside_capture_vs_category": (
+                    r6(dcc * g["downside_capture_vs_category_tolerance"] - dc)
+                    if (dc is not None and dcc is not None) else None),
+                "drawdown_vs_category": (
+                    r6(mdd - mddc * g["drawdown_vs_category_tolerance"])
+                    if (mdd is not None and mddc is not None) else None),
+            }
             self.gate_results[f["name"]] = {
-                "checks": checks, "passed": all(checks.values())}
+                "checks": checks, "margins": margins,
+                "passed": all(checks.values())}
 
     # ---------------- scoring ----------------
     def score(self):
@@ -599,8 +738,12 @@ class RecommendationEngine:
         picked, picked_names, decisions = [], set(), []
         weights = {f["name"]: equity_weights(f["raw"]) for f in ranked}
 
+        excluded = set(sel.get("exclude_funds") or [])
+
         def blocked_by(f):
             """AMC / category / overlap constraints vs funds already picked."""
+            if f["name"] in excluded:
+                return "excluded_by_config"
             if sel["max_funds_per_amc"] and sum(
                     1 for p in picked if p["house"] == f["house"]) >= sel["max_funds_per_amc"]:
                 return "amc_limit"
@@ -658,6 +801,92 @@ class RecommendationEngine:
         self.selection, self.decisions, self.ranked = picked, decisions, ranked
         self.holdings_weights = weights
 
+    # ---------------- near-miss watchlist ----------------
+    def near_misses(self, max_failed):
+        """Universe funds that failed between 1 and `max_failed` gate(s),
+        each with the margin by which every failed check missed its line.
+
+        DIAGNOSTIC ONLY: a near-miss fund failed at least one capital-
+        protection gate and is therefore never scored, never selected. This
+        tier exists so a human can see HOW CLOSE a rejection was (e.g. R²
+        69.6 vs 70.0) without the engine ever moving a threshold — visibility
+        instead of relaxation. Deterministic: closest miss first, data-only
+        gaps (no numeric margin) last, fund-name final tie-break."""
+        g = self.cfg["gates"]
+        out = []
+        for f in self.universe:
+            gr = self.gate_results[f["name"]]
+            if gr["passed"]:
+                continue
+            failed = sorted(k for k, ok in gr["checks"].items() if not ok)
+            if not (1 <= len(failed) <= max_failed):
+                continue
+            m = self.metrics[f["name"]]
+            fgs = []
+            for chk in failed:
+                value, threshold = gate_display(chk, m, f["bucket"], g)
+                fgs.append({"gate": chk, "value": value,
+                            "threshold": threshold,
+                            "margin": gr["margins"].get(chk)})
+            out.append({"fund": f["name"], "fund_house": f["house"],
+                        "category": f["category"], "bucket": f["bucket"],
+                        "horizon_used": m["horizon_used"],
+                        "failed_gates": fgs})
+
+        def key(r):
+            mags = [abs(fg["margin"]) for fg in r["failed_gates"]
+                    if fg["margin"] is not None]
+            return (min(mags) if mags else float("inf"), r["fund"])
+        out.sort(key=key)
+        return out
+
+    # ---------------- bench (pre-validated substitutes) ----------------
+    def bench_alternates(self, per_pick):
+        """For each pick, the next-ranked gate survivors in the SAME bucket
+        that could REPLACE it without violating any selection constraint
+        against the OTHER picks (AMC, category, pairwise overlap). Checked as
+        a drop-in substitution — the candidate may conflict with the pick it
+        replaces (that pick would be gone), never with the picks that stay.
+
+        REPORTING ONLY: the selection itself is untouched. This exists so the
+        Stage 3 NAV check can verify substitutes in the same pass — a failed
+        pick then has a known-good, already-verified replacement instead of
+        triggering a manual search. Deterministic: picks in rank order,
+        candidates in ranked order."""
+        sel = self.cfg["selection"]
+        excluded = set(sel.get("exclude_funds") or [])
+        picked_names = {p["name"] for p in self.selection}
+        out = []
+        for p in self.selection:
+            others = [q for q in self.selection if q["name"] != p["name"]]
+            alts = []
+            for f in self.ranked:
+                if (f["name"] in picked_names or f["name"] in excluded
+                        or f["bucket"] != p["bucket"]):
+                    continue
+                if sel["max_funds_per_amc"] and sum(
+                        1 for q in others
+                        if q["house"] == f["house"]) >= sel["max_funds_per_amc"]:
+                    continue
+                if sel["max_funds_per_category"] and sum(
+                        1 for q in others
+                        if q["category"] == f["category"]) >= sel["max_funds_per_category"]:
+                    continue
+                wa = self.holdings_weights.get(f["name"]) or {}
+                if wa and any(
+                        pairwise_overlap(wa, self.holdings_weights.get(q["name"]) or {})
+                        > sel["max_pairwise_overlap_pct"]
+                        for q in others if self.holdings_weights.get(q["name"])):
+                    continue
+                alts.append({"fund": f["name"], "fund_house": f["house"],
+                             "category": f["category"],
+                             "score": self.scores.get(f["name"])})
+                if len(alts) >= per_pick:
+                    break
+            out.append({"pick": p["name"], "bucket": p["bucket"],
+                        "alternates": alts})
+        return out
+
     # ---------------- report ----------------
     def run(self):
         self.load()
@@ -668,13 +897,31 @@ class RecommendationEngine:
         return self.report()
 
     def report(self):
-        overlap_matrix = {}
+        # Per-pick holdings coverage — the scrape may capture only part of a
+        # fund's book (Morningstar caps its public table), which makes the
+        # overlap gate a LOWER bound, not a certainty.
+        coverage = {f["name"]: holdings_coverage(f["raw"]) for f in self.selection}
+        overlap_threshold = self.cfg["selection"]["max_pairwise_overlap_pct"]
+        overlap_matrix, overlap_upper, uncertain_pairs = {}, {}, []
         for i, a in enumerate(self.selection):
             for b in self.selection[i + 1:]:
                 wa = self.holdings_weights.get(a["name"]) or {}
                 wb = self.holdings_weights.get(b["name"]) or {}
                 if wa and wb:
-                    overlap_matrix[f"{a['name']} x {b['name']}"] = pairwise_overlap(wa, wb)
+                    key = f"{a['name']} x {b['name']}"
+                    measured = pairwise_overlap(wa, wb)
+                    upper = overlap_upper_bound(
+                        wa, wb, coverage[a["name"]]["unseen_weight_pct"],
+                        coverage[b["name"]]["unseen_weight_pct"])
+                    overlap_matrix[key] = measured
+                    overlap_upper[key] = upper
+                    # measured is within budget but truncation means the TRUE
+                    # overlap could still exceed it — cannot certify, flag it.
+                    if measured <= overlap_threshold < upper:
+                        uncertain_pairs.append({
+                            "pair": key, "measured_pct": measured,
+                            "worst_case_pct": upper,
+                            "threshold_pct": overlap_threshold})
 
         rep = {
             "engine_version": ENGINE_VERSION,
@@ -703,18 +950,48 @@ class RecommendationEngine:
                  "category": f["category"], "bucket": f["bucket"],
                  "score": self.scores.get(f["name"]),
                  "recommendation_reason": build_reason(
-                     self.metrics[f["name"]], f["bucket"], f["category"])}
+                     self.metrics[f["name"]], f["bucket"], f["category"]),
+                 "manual_verification": manual_verification_items(
+                     coverage[f["name"]])}
                 for i, f in enumerate(self.selection)
             ],
             "selection_decisions": self.decisions,
             "overlap_matrix_pct": overlap_matrix,
+            # Worst-case overlap accounting for truncated holdings tables (equals
+            # measured when both tables are complete). uncertain_pairs flags any
+            # pair that PASSES on measured overlap but cannot be CERTIFIED <=
+            # threshold because part of a portfolio is unseen — verify externally.
+            "overlap_upper_bound_pct": overlap_upper,
+            "holdings_coverage": coverage,
+            "overlap_uncertain_pairs": uncertain_pairs,
+            "manual_verification_note": (
+                "Sortino, manager tenure, and full-holdings overlap are not "
+                "available from Morningstar's public pages — verify them on the "
+                "finalists before investing (per-fund items under each "
+                "recommendation)."),
+            # Pre-validated substitutes per pick (same bucket, no conflict
+            # with the OTHER picks) — verified by Stage 3 alongside the picks
+            # so a failed finalist has a known-good replacement ready.
+            "bench": self.bench_alternates(
+                self.cfg.get("reporting", {}).get("bench_alternates_per_pick", 2)),
+            "near_misses": self.near_misses(
+                self.cfg.get("reporting", {}).get("near_miss_max_failed_gates", 1)),
             "notes_and_caveats": self.notes + [
+                "near_misses is a DIAGNOSTIC watchlist of funds that failed a "
+                "small number of gates by the recorded margin — they are never "
+                "scored or selected; gates are never relaxed to admit them.",
+                "bench lists pre-validated substitutes per pick (same bucket, "
+                "no AMC/category/overlap conflict with the OTHER picks) — "
+                "reporting only; use one when a pick fails the Stage 3 NAV "
+                "check, or re-run with --exclude for a full re-selection.",
                 "Metrics are Morningstar's published risk tables for the scraped "
                 "snapshot; they change as the site updates — the input_hashes pin "
                 "exactly which snapshot produced this report.",
                 "Overlap uses scraped equity-holding NAMES (Morningstar's public "
                 "table may list fewer rows than the fund's full portfolio), so "
-                "treat it as a lower bound on true overlap.",
+                "overlap_matrix_pct is a LOWER bound; overlap_upper_bound_pct is "
+                "the rigorous worst case and overlap_uncertain_pairs flags any "
+                "pair that cannot be certified within budget from scraped data.",
                 "Past performance does not predict future returns; mutual fund "
                 "investments are subject to market risk.",
                 "Determinism guarantee: identical config_hash + input_hashes -> "
@@ -744,10 +1021,74 @@ def write_report(rep, out_dir):
         lines += [f"## {r['rank']}. {r['fund']}  (score {r['score']})",
                   f"*{r['fund_house']} — {r['category']} — {r['bucket']} bucket*",
                   "", r["recommendation_reason"], ""]
+        if r.get("manual_verification"):
+            lines.append("**Manual verification before investing:**")
+            lines += [f"- [ ] {item}" for item in r["manual_verification"]]
+            lines.append("")
+    if rep.get("bench"):
+        lines.append("### Bench — pre-validated substitutes")
+        lines.append("_If a pick fails post-engine verification (e.g. the "
+                     "Stage 3 NAV rolling-return check), these same-bucket "
+                     "funds already clear every selection constraint against "
+                     "the remaining picks. Stage 3 verifies them alongside "
+                     "the picks. For a full re-selection instead, re-run with "
+                     "`--exclude 'failed fund name'`._")
+        for b in rep["bench"]:
+            if b["alternates"]:
+                subs = "; ".join(
+                    f"{a['fund']} (score {a['score']}, {a['fund_house']})"
+                    for a in b["alternates"])
+                lines.append(f"- for **{b['pick']}** ({b['bucket']}): {subs}")
+            else:
+                lines.append(f"- for **{b['pick']}** ({b['bucket']}): no "
+                             f"eligible substitute — a failure here needs an "
+                             f"--exclude re-run")
+        lines.append("")
     if rep["overlap_matrix_pct"]:
-        lines.append("### Pairwise equity overlap (%)")
+        cov = rep.get("holdings_coverage", {})
+        upper = rep.get("overlap_upper_bound_pct", {})
+        any_trunc = any(c.get("truncated") for c in cov.values())
+        header = ("### Pairwise equity overlap (%)  —  measured (worst-case)"
+                  if any_trunc else "### Pairwise equity overlap (%)")
+        lines.append(header)
         for k, v in sorted(rep["overlap_matrix_pct"].items()):
-            lines.append(f"- {k}: {v}")
+            wc = upper.get(k)
+            lines.append(f"- {k}: {v}" + (f"  (worst-case {wc})"
+                                          if wc is not None and wc != v else ""))
+        lines.append("")
+        if any_trunc:
+            lines.append("_Holdings coverage (scraped / declared, % weight visible):_")
+            for name, c in sorted(cov.items()):
+                flag = "  ⚠ TRUNCATED" if c.get("truncated") else ""
+                lines.append(f"- {name}: {c['scraped']}/{c['declared']} holdings, "
+                             f"{c['scraped_weight_pct']}% weight{flag}")
+            lines.append("")
+    if rep.get("overlap_uncertain_pairs"):
+        lines.append("### ⚠ Overlap could not be certified — VERIFY EXTERNALLY")
+        lines.append("_These pairs pass the overlap gate on SCRAPED holdings, but "
+                     "a truncated table means the TRUE overlap could exceed the "
+                     f"{rep['overlap_uncertain_pairs'][0]['threshold_pct']}% budget. "
+                     "Re-check on a tool with the complete holdings sheets before "
+                     "investing._")
+        for u in rep["overlap_uncertain_pairs"]:
+            lines.append(f"- {u['pair']}: measured {u['measured_pct']}% but "
+                         f"worst-case up to {u['worst_case_pct']}% "
+                         f"(budget {u['threshold_pct']}%)")
+        lines.append("")
+    if rep.get("near_misses"):
+        lines.append("### Near-miss watchlist (diagnostic — never selected)")
+        lines.append("_Funds that failed the fewest gates, closest miss first. "
+                     "The gate is NOT relaxed for them — this only shows how "
+                     "narrowly each was rejected._")
+        for nm in rep["near_misses"][:15]:
+            fg = (nm["failed_gates"] or [{}])[0]
+            lines.append(
+                f"- {nm['fund']} ({nm['category']}, {nm['bucket']}): failed "
+                f"`{fg.get('gate', '?')}` — value {fg.get('value')} vs "
+                f"threshold {fg.get('threshold')} (margin {fg.get('margin')})")
+        if len(rep["near_misses"]) > 15:
+            lines.append(f"- …and {len(rep['near_misses']) - 15} more "
+                         "(full list in recommendations.json `near_misses`)")
         lines.append("")
     lines.append("### Caveats")
     lines += [f"- {n}" for n in rep["notes_and_caveats"]]
@@ -957,6 +1298,56 @@ def selftest():
         for r in rep1["recommendations"]:
             for token in ("alpha", "up-markets", "recovered", "avg star"):
                 assert token in r["recommendation_reason"], f"reason missing {token!r}"
+        # near-miss watchlist: diagnostic only — never a pick, always a
+        # gate-excluded fund, and bounded by the configured failed-gate cap.
+        nm = rep1["near_misses"]
+        nm_funds = {r["fund"] for r in nm}
+        assert nm_funds.isdisjoint(set(picks)), "near-miss must never be a pick"
+        assert nm_funds <= set(excluded), "near-miss funds must be gate-excluded"
+        cap = cfg["reporting"]["near_miss_max_failed_gates"]
+        for r in nm:
+            assert 1 <= len(r["failed_gates"]) <= cap, "near-miss gate cap violated"
+        # Beta Heavy fails ONLY the high-beta compensation gate -> a textbook
+        # single-gate near-miss, surfaced with a numeric margin.
+        assert "Beta Heavy Fund Direct Growth" in nm_funds, \
+            "single-gate failure not surfaced in near_misses"
+        bh = next(r for r in nm if r["fund"] == "Beta Heavy Fund Direct Growth")
+        assert bh["failed_gates"][0]["gate"] == "high_beta_alpha_compensation"
+        assert bh["failed_gates"][0]["margin"] is not None, "margin not recorded"
+
+        # bench: pre-validated substitutes — never a picked fund, same bucket
+        # as the pick they'd replace, and REPLACE-in-place semantics: the Core
+        # Twin (65% overlap with the core PICK, but zero conflict with the
+        # OTHER picks) is exactly what the core bench must surface.
+        bench = {b["pick"]: b for b in rep1["bench"]}
+        assert set(bench) == set(picks), "bench must cover every pick"
+        for b in rep1["bench"]:
+            for a in b["alternates"]:
+                assert a["fund"] not in picks, "bench alternate is already a pick"
+        core_bench = [a["fund"]
+                      for a in bench["Core Star Fund Direct Growth"]["alternates"]]
+        assert "Core Twin Fund Direct Growth" in core_bench, \
+            "replace-in-place substitute missing from core bench"
+
+        # closed loop: excluding the seated core anchor must rebuild the
+        # portfolio with the twin seated instead, and log the exclusion.
+        cfg_ex = json.loads(json.dumps(cfg))
+        cfg_ex["selection"]["exclude_funds"] = ["Core Star Fund Direct Growth"]
+        rep_ex = RecommendationEngine(tmp, cfg_ex).run()
+        picks_ex = [r["fund"] for r in rep_ex["recommendations"]]
+        assert "Core Star Fund Direct Growth" not in picks_ex, "exclusion ignored"
+        assert "Core Twin Fund Direct Growth" in picks_ex, \
+            "core slot not re-seated after exclusion"
+        assert any(d.get("reason") == "excluded_by_config"
+                   and d["fund"] == "Core Star Fund Direct Growth"
+                   for d in rep_ex["selection_decisions"]), \
+            "exclusion not recorded in the decision log"
+        assert rep_ex["config_hash"] != rep1["config_hash"], \
+            "exclusion must be part of the config hash"
+        # still ranked for transparency, just never selected
+        assert any(r["fund"] == "Core Star Fund Direct Growth"
+                   for r in rep_ex["ranking"]), "excluded fund missing from ranking"
+
         cfg2 = json.loads(json.dumps(cfg))
         cfg2["gates"]["r_squared_min"] = 80.0
         rep3 = RecommendationEngine(tmp, cfg2).run()
@@ -1018,6 +1409,13 @@ def main():
     ap.add_argument("--out", default="ms_data/recommendation_run")
     ap.add_argument("--no-history", action="store_true",
                     help="skip appending to <data>/metrics_history.jsonl")
+    ap.add_argument("--exclude", action="append", default=[], metavar="FUND",
+                    help="bar this fund from SELECTION (repeatable; exact "
+                         "name). Still ranked/scored for transparency, "
+                         "skipped with an 'excluded_by_config' decision. Use "
+                         "after a Stage 3 NAV-check FAIL so the engine "
+                         "rebuilds the portfolio under full constraints. "
+                         "Recorded in config_hash.")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -1036,6 +1434,10 @@ def main():
                 else:
                     base[k] = v
         merge(cfg, user_cfg)
+
+    if args.exclude:
+        cfg["selection"]["exclude_funds"] = sorted(
+            set(cfg["selection"].get("exclude_funds") or []) | set(args.exclude))
 
     engine = RecommendationEngine(args.data, cfg)
     rep = engine.run()

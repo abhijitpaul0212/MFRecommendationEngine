@@ -90,9 +90,32 @@ SESSION_RESTART_ATTEMPTS = 3  # browser (re)starts per worker before giving up
 REPAIR_ROUNDS = 2             # post-run completeness audit re-extraction passes
 SAL_WAIT_TIMEOUT = 45       # SAL widgets fetch data after page load
 SECONDS_PER_FUND_EST = 50   # for the runtime estimate printed before enrichment
+RECYCLE_EVERY = 25          # proactively restart a worker's Chrome after this
+                            # many enrichment tasks: long-lived renderers on the
+                            # JS-heavy SAL pages accumulate memory that is only
+                            # returned to the OS on process exit
+PROGRESS_EVERY = 10         # print an aggregate PROGRESS line (done/total,
+                            # failed, elapsed, eta) every N finished tasks
 
 HOLDING_TYPES = ("Equity", "Bond")        # 'Other' intentionally excluded
 YEAR_TABS = (("for3Year", "3Y"), ("for5Year", "5Y"), ("for10Year", "10Y"))
+ALL_RISK_HORIZONS = frozenset(key for _, key in YEAR_TABS)
+
+# Categories the bundled recommendation engine actually scores (its four
+# bucket lists in selection/mf_recommend.py DEFAULT_CONFIG["universe"]["buckets"]).
+# A fund whose Category is outside this set is dropped by the engine at
+# selection time, so enriching it is wasted work. --recommendation-universe-only
+# uses this list to skip those funds at task-build time (their cheap LIST-level
+# data is still captured). MUST stay identical to the engine's buckets — the
+# test test_recommendation_universe_matches_engine guards against drift.
+RECOMMENDATION_UNIVERSE_CATEGORIES = frozenset({
+    "Flexi Cap", "Large-Cap", "Large & Mid- Cap", "Focused Fund",   # core
+    "Mid-Cap",                                                       # growth
+    "Small-Cap",                                                     # aggressive
+    "Value", "Contra", "Dividend Yield", "Multi-Cap",               # diversifier
+    "Multi Asset Allocation", "Aggressive Allocation",
+    "Dynamic Asset Allocation", "Balanced Allocation",
+})
 
 HOLDINGS_TABLE_CSS = "table[summary*='Holdings component']"
 RISK_TABLE_CSS = ".sal-risk-volatility-measures__dataTable table"
@@ -379,6 +402,31 @@ def enrichment_issues(entry):
     return issues
 
 
+def format_duration(seconds):
+    """Seconds -> 'm:ss' (or 'h:mm:ss' past an hour). Pure; unit-tested."""
+    s = max(0, int(round(seconds)))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def format_progress(label, done, total, failed, elapsed_s, last=None):
+    """Aggregate progress line for the console. ETA is a simple rate
+    extrapolation (elapsed/done x remaining) — honest for a task list whose
+    items cost roughly the same. These are CUMULATIVE counts over the phase,
+    not stats for a single fund; `last` names the fund this checkpoint fired
+    after, so the line has a landmark without implying it describes one fund.
+    Pure; unit-tested."""
+    pct = round(100 * done / max(1, total))
+    line = (f"PROGRESS[{label}]: {done}/{total} ({pct}%), failed={failed}, "
+            f"elapsed={format_duration(elapsed_s)}")
+    if 0 < done < total:
+        line += f", eta={format_duration(elapsed_s / done * (total - done))}"
+    if last:
+        line += f", last={last}"
+    return line
+
+
 # ---------------------------------------------------------------------------
 # Resource governor policy (pure parts) — keeps parallel Chrome from
 # exhausting laptop RAM. The governor thread samples available memory and
@@ -438,6 +486,24 @@ def allowed_workers(configured, available_gb):
     if available_gb >= 1.0:
         return 1
     return 0
+
+
+def ram_capped_workers(requested, available_gb, per_worker_gb=1.2,
+                       reserve_gb=1.0):
+    """STARTUP sizing (the governor above is the RUNTIME throttle): how many
+    workers current free memory can actually sustain. Each worker is a full
+    multi-process Chrome that costs ~per_worker_gb on Morningstar's JS-heavy
+    SAL pages, and the OS needs reserve_gb of headroom to avoid swap-thrash.
+
+    Rationale (observed on an 8 GB machine): starting 6 workers with ~3 GB
+    free doesn't yield 6 workers — it yields a boot spike, memory collapse,
+    and the governor pinning the run to 1 slot (67% of samples) while the
+    other 5 browsers thrash and restart. Sizing the fleet to what RAM
+    sustains gives the same real throughput with none of the crash tax.
+    Unknown memory fails open (the governor still protects at runtime)."""
+    if available_gb is None:
+        return requested
+    return max(1, min(requested, int((available_gb - reserve_gb) / per_worker_gb)))
 
 
 def is_recently_enriched(enriched_at, refresh_days, now=None):
@@ -508,8 +574,14 @@ def make_driver(headless=True):
     # already uses explicit element waits, so DOMContentLoaded is enough and
     # avoids most "Timed out receiving message from renderer" errors.
     opts.page_load_strategy = "eager"
-    opts.add_experimental_option(
-        "prefs", {"profile.default_content_setting_values.notifications": 2})
+    opts.add_experimental_option("prefs", {
+        "profile.default_content_setting_values.notifications": 2,
+        # Never decode images/ads: every value this scraper reads is DOM text
+        # or a title attribute (star ratings are inline SVG + "Star rating: N"
+        # titles, unaffected by this setting). Image decoding is pure renderer
+        # RAM + bandwidth on these ad-laden pages.
+        "profile.managed_default_content_settings.images": 2,
+    })
     d = S["webdriver"].Chrome(options=opts)
     d.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     return d
@@ -1007,7 +1079,11 @@ class FundDetailPage:
                 return True
         return False
 
-    def read_detailed_portfolio(self):
+    def read_detailed_portfolio(self, types=HOLDING_TYPES):
+        """`types` limits which holdings tables are WALKED (button click +
+        pager); the output dict always keeps the full HOLDING_TYPES shape, so
+        a skipped type is an empty list — the exact state the store already
+        uses when Morningstar exposes no rows for that type."""
         summary = self.read_holdings_summary()
         holdings = {h: [] for h in HOLDING_TYPES}
 
@@ -1030,7 +1106,7 @@ class FundDetailPage:
             holdings[target] = rows
             return {"holdings_summary": summary, "holdings": holdings}
 
-        for htype in HOLDING_TYPES:
+        for htype in types:
             try:
                 self.select_holding_type(htype)
                 holdings[htype] = self.read_all_holdings_pages()
@@ -1130,10 +1206,20 @@ class MorningstarScraper:
 
     def __init__(self, out_dir, headless=True, delay=ACTION_DELAY,
                  workers=1, max_pages=MAX_PAGES_GUARD, limit=None,
-                 force_workers=False):
+                 force_workers=False, equity_holdings_only=False,
+                 recommendation_universe_only=False):
         self.out_dir = out_dir
         self.headless = headless
         self.delay = delay
+        self.force_workers = force_workers
+        # Opt-in: enrich ONLY the categories the recommendation engine scores
+        # (RECOMMENDATION_UNIVERSE_CATEGORIES). Skips the ~80% of funds the
+        # engine ignores — their LIST-level data is still captured.
+        self.recommendation_universe_only = recommendation_universe_only
+        # The engine consumes only Equity rows (overlap/quality/sector) plus
+        # the holdings_summary; Bond rows are optional context. Skipping them
+        # saves the Bond button click + its pager walk on every fund.
+        self.holding_types = ("Equity",) if equity_holdings_only else HOLDING_TYPES
         # Each worker is a full multi-process Chrome; too many starve the
         # renderers ("Timed out receiving message from renderer") and total
         # throughput FALLS while the site request rate climbs. Clamp to a
@@ -1162,6 +1248,14 @@ class MorningstarScraper:
         self.house_urls = {}     # house -> {fund: href}
         self.failed_houses = {}
         self.fund_failures = {}  # house -> {fund: err}
+        # progress tracking for the CURRENT enrichment dispatch (owned by
+        # _dispatch_enrichment — ENRICH and each REPAIR round reset it, so
+        # counts can never overflow their phase's total)
+        self._enrich_total = 0
+        self._enrich_done = 0
+        self._enrich_failed = 0
+        self._enrich_label = ""
+        self._enrich_started = None
         # governor state: how many worker slots may run concurrently
         self._slot_cv = threading.Condition()
         self._max_active = self.workers
@@ -1239,6 +1333,32 @@ class MorningstarScraper:
                     self._alert(f"memory recovered ({avail:.1f} GB) — "
                                 f"restoring {target}/{self.workers} worker(s)")
                 self._set_max_active(target)
+
+    def _progress_print(self, detail, failed=False):
+        """The single funnel for per-task enrichment console lines: counts the
+        finished task (success or failure) under the lock, prints the per-fund
+        line with its [done/total] counter, and every PROGRESS_EVERY tasks
+        (and on the last one) prints the aggregate PROGRESS line with failure
+        count, elapsed time and a rate-extrapolated ETA."""
+        with self._lock:
+            self._enrich_done += 1
+            if failed:
+                self._enrich_failed += 1
+            done, total = self._enrich_done, self._enrich_total
+            nfail, label = self._enrich_failed, self._enrich_label
+            started = self._enrich_started
+        pct = round(100 * done / max(1, total))
+        print(f"  [enrich] {detail} | [{done:4d}/{total}] {pct:3d}%",
+              flush=True)
+        if done % PROGRESS_EVERY == 0 or done >= total:
+            elapsed = time.monotonic() - (started or time.monotonic())
+            # detail is "<fund name>: <stats>"; the name anchors the aggregate
+            # to the fund this checkpoint fired after (the stats stay cumulative)
+            last = detail.split(":", 1)[0].strip()
+            print(flush=True)                   # gap before summary
+            print(f"  {format_progress(label, done, total, nfail, elapsed, last)}",
+                  flush=True)
+            print(flush=True)                   # gap after summary
 
     def _house_path(self, house):
         return os.path.join(self.out_dir, f"{safe_house_name(house)}.json")
@@ -1385,14 +1505,20 @@ class MorningstarScraper:
         # renders was the cause of empty-summary enrichments.
         dp.open(tabs["detailed_portfolio"],
                 wait_css=".holdings-summary .sal-dp-pair")
-        portfolio = dp.read_detailed_portfolio()
+        portfolio = dp.read_detailed_portfolio(self.holding_types)
         dp.open(tabs["risk_ratings"], wait_css=RISK_TABLE_CSS)
         risk = dp.read_all_risk_years()
         return portfolio, risk
 
-    def _enrich_worker(self, worker_id, tasks):
+    def _enrich_worker(self, worker_id, tasks, attempts=2):
         """Owns one browser. NEVER raises: any failure is recorded per fund in
-        the manifest and the worker moves on to its next task."""
+        the manifest and the worker moves on to its next task.
+
+        attempts=1 is the deferred-retry mode used by the main ENRICH pass:
+        a failing fund is never retried in place (that blocks the worker for
+        minutes on a fund that will almost certainly fail again seconds
+        later) — it stays recorded as failed, the post-run audit picks it up,
+        and the REPAIR rounds re-attempt it after everything else is done."""
         d = dp = None
 
         def fresh_session(old_driver):
@@ -1414,6 +1540,7 @@ class MorningstarScraper:
 
         try:
             d, dp = fresh_session(None)
+            done_since_recycle = 0
             for house, name, href in tasks:
                 # governor gate: waits for a slot; when fully paused, quit the
                 # browser so its RAM is actually returned to the OS
@@ -1426,15 +1553,24 @@ class MorningstarScraper:
                         d = dp = None
                     time.sleep(10)
                 try:
+                    # proactive recycle: renderer memory on the SAL pages only
+                    # returns to the OS when the Chrome processes exit, so a
+                    # long task list must not run on one immortal browser
+                    if dp is not None and done_since_recycle >= RECYCLE_EVERY:
+                        d, dp = fresh_session(d)
+                        done_since_recycle = 0
                     if dp is None:                  # try to heal before skipping
                         d, dp = fresh_session(d)
+                        done_since_recycle = 0
                     if dp is None:
                         with self._lock:
                             self.fund_failures.setdefault(house, {})[name] = (
                                 "browser session could not be (re)started")
+                        self._progress_print(f"{name}: FAILED (no browser)",
+                                             failed=True)
                         continue
                     last_err = None
-                    for attempt in (1, 2):
+                    for attempt in range(1, attempts + 1):
                         try:
                             portfolio, risk = self.enrich_fund(dp, href)
                             # Validate BEFORE saving: an incomplete result
@@ -1458,9 +1594,12 @@ class MorningstarScraper:
                             if dp is None:
                                 break
                     if last_err is not None or dp is None:
+                        err_msg = str(last_err) if last_err else "browser session lost"
                         with self._lock:
-                            self.fund_failures.setdefault(house, {})[name] = str(
-                                last_err or "browser session lost")
+                            self.fund_failures.setdefault(house, {})[name] = err_msg
+                        tag = ("FAILED — queued for repair pass"
+                               if attempts == 1 else "FAILED")
+                        self._progress_print(f"{name}: {tag}", failed=True)
                         continue
                     with self._lock:
                         self.house_data[house][name] = nest_fund_details(
@@ -1471,11 +1610,20 @@ class MorningstarScraper:
                         self.fund_failures.get(house, {}).pop(name, None)
                     eq = portfolio["holdings"].get("Equity")
                     bd = portfolio["holdings"].get("Bond")
-                    print(f"  [enrich] {name}: equity="
-                          f"{len(eq) if isinstance(eq, list) else 'ERR'} bond="
-                          f"{len(bd) if isinstance(bd, list) else 'ERR'} "
-                          f"risk={sorted(risk)}", flush=True)
+                    line = (f"{name}: equity="
+                            f"{len(eq) if isinstance(eq, list) else 'ERR'} bond="
+                            f"{len(bd) if isinstance(bd, list) else 'ERR'}")
+                    # risk is noise when it's the full expected set (the vast
+                    # majority of funds) — only surface it when a horizon is
+                    # actually missing, so the rare degraded case stands out
+                    # instead of being buried under hundreds of identical lines
+                    missing = ALL_RISK_HORIZONS - set(risk)
+                    if missing:
+                        line += (f" risk={sorted(risk)} "
+                                f"⚠ missing {sorted(missing)}")
+                    self._progress_print(line)
                 finally:
+                    done_since_recycle += 1
                     self._release_slot()
         finally:
             if d is not None:
@@ -1485,14 +1633,27 @@ class MorningstarScraper:
                     pass
 
     # ---------------- audit + repair ----------------
-    def _dispatch_enrichment(self, tasks, label):
-        """Fan a task list out across worker browsers; never raises."""
+    def _dispatch_enrichment(self, tasks, label, attempts=2):
+        """Fan a task list out across worker browsers; never raises.
+        Owns the progress counters: every dispatch (ENRICH, each REPAIR round)
+        is its own phase with its own total/label, so [done/total] and the
+        PROGRESS summary can never overflow across phases.
+
+        attempts: in-place tries per fund before it is left to the deferred
+        repair queue. The main ENRICH pass uses 1 (fail fast, keep moving);
+        REPAIR rounds keep 2 (last chance, worth the in-place retry)."""
         if not tasks:
             return
+        with self._lock:
+            self._enrich_total = len(tasks)
+            self._enrich_done = 0
+            self._enrich_failed = 0
+            self._enrich_label = label
+            self._enrich_started = time.monotonic()
         n = min(self.workers, len(tasks)) or 1
         buckets = [tasks[i::n] for i in range(n)]
         with ThreadPoolExecutor(max_workers=n) as pool:
-            futs = [pool.submit(self._enrich_worker, i, b)
+            futs = [pool.submit(self._enrich_worker, i, b, attempts)
                     for i, b in enumerate(buckets) if b]
             for f in as_completed(futs):
                 try:
@@ -1567,6 +1728,24 @@ class MorningstarScraper:
             refresh_days=None):
         os.makedirs(self.out_dir, exist_ok=True)
 
+        # STARTUP RAM sizing (the governor below is the runtime throttle):
+        # shrink the fleet to what free memory actually sustains BEFORE any
+        # Chrome starts, instead of booting N browsers and letting the
+        # governor fight the resulting memory collapse. --force-workers skips
+        # this the same way it skips the CPU ceiling.
+        if not self.force_workers:
+            avail = available_memory_gb()
+            sustainable = ram_capped_workers(self.workers, avail)
+            if sustainable < self.workers:
+                print(f"NOTE: --workers {self.workers} reduced to "
+                      f"{sustainable} — only {avail:.1f} GB RAM is available "
+                      f"and each worker is a full Chrome (~1.2 GB on these "
+                      f"pages). More workers here would swap-thrash and get "
+                      f"throttled to fewer effective workers than this. "
+                      f"Pass --force-workers to override.", flush=True)
+                self.workers = sustainable
+                self._set_max_active(sustainable)
+
         # Resource governor: keeps a heartbeat in <out>/_resource_monitor.log
         # and throttles/pauses worker slots when the machine runs low on RAM,
         # so parallel Chrome can never exhaust the laptop and crash the run.
@@ -1640,7 +1819,8 @@ class MorningstarScraper:
 
         # Phase B: enrichment tasks round-robin across workers
         tasks, no_url = [], []
-        skipped_plan = skipped_fresh = 0
+        skipped_plan = skipped_fresh = skipped_category = 0
+        skipped_cat_names = set()
         fund_filter = {f for f in (funds or [])}
         for house in sorted(self.house_data):
             names = sorted(self.house_data[house])
@@ -1650,6 +1830,20 @@ class MorningstarScraper:
                 before = len(names)
                 names = [x for x in names if is_direct_growth(x)]
                 skipped_plan += before - len(names)
+            if self.recommendation_universe_only:
+                # Drop funds the engine will never score (category outside its
+                # buckets). LIST-level data for them is already saved; only the
+                # expensive per-fund enrichment is skipped.
+                before = len(names)
+                kept = []
+                for x in names:
+                    cat = (self.house_data[house][x].get("Category") or "").strip()
+                    if cat in RECOMMENDATION_UNIVERSE_CATEGORIES:
+                        kept.append(x)
+                    else:
+                        skipped_cat_names.add(cat or "(no category)")
+                names = kept
+                skipped_category += before - len(names)
             if refresh_days:
                 before = len(names)
                 # Skip only entries that are BOTH fresh AND complete — a bad
@@ -1684,10 +1878,23 @@ class MorningstarScraper:
             print(f"  --refresh-days {refresh_days}: skipping {skipped_fresh} "
                   f"fund(s) already enriched within the last {refresh_days} "
                   f"days", flush=True)
+        if skipped_category:
+            shown = ", ".join(sorted(skipped_cat_names)[:6])
+            more = len(skipped_cat_names) - 6
+            print(f"  --recommendation-universe-only: skipping {skipped_category} "
+                  f"fund(s) outside the engine's {len(RECOMMENDATION_UNIVERSE_CATEGORIES)} "
+                  f"scored categories (list data still captured). Categories "
+                  f"skipped: {shown}" + (f", +{more} more" if more > 0 else ""),
+                  flush=True)
         est_min = len(tasks) * SECONDS_PER_FUND_EST / max(1, self.workers) / 60
         print(f"ENRICH phase: {len(tasks)} fund(s) across {self.workers} "
               f"browser(s) (~{est_min:.0f} min estimated)...", flush=True)
-        self._dispatch_enrichment(tasks, "ENRICH")
+        # Deferred-retry policy: ONE attempt per fund here. A failure is
+        # recorded and the worker moves straight on — no in-place retry, no
+        # browser-restart stall. The audit below rebuilds the failure queue
+        # from disk and the REPAIR rounds re-attempt it only after every
+        # other fund and house has been processed.
+        self._dispatch_enrichment(tasks, "ENRICH", attempts=1)
 
         # Phase C: COMPLETENESS AUDIT + targeted repair. Double-check the
         # count (expected tasks vs entries that are actually complete on
@@ -1756,6 +1963,21 @@ def main():
                     help="enrich only Direct+Growth plan variants — the ones "
                          "the recommendation engine uses (~75%% less work); "
                          "list-level data is still captured for every fund")
+    ap.add_argument("--equity-holdings-only", action="store_true",
+                    help="skip walking the Bond holdings table per fund (the "
+                         "recommendation engine consumes only Equity rows + "
+                         "the holdings summary). Bond is stored as an empty "
+                         "list — the same state as when Morningstar exposes "
+                         "no Bond tab. Saves a button click + pager walk per "
+                         "fund with bonds.")
+    ap.add_argument("--recommendation-universe-only", action="store_true",
+                    help="enrich ONLY the fund categories the recommendation "
+                         "engine actually scores (Flexi/Large/Mid/Small-Cap, "
+                         "Value, Multi-Cap, allocation funds, etc.). Skips the "
+                         "~80%% of funds it never selects — debt, index, sector, "
+                         "arbitrage, long-short — whose list-level data is still "
+                         "captured. Combine with --direct-growth-only for the "
+                         "smallest sufficient enrichment set.")
     ap.add_argument("--refresh-days", type=int, default=None,
                     help="skip re-enriching a fund if it was already enriched "
                          "within this many days (Morningstar's risk/holdings "
@@ -1770,10 +1992,13 @@ def main():
     if args.fund and not args.house:
         ap.error("--fund requires --house")
 
-    scraper = MorningstarScraper(args.out, headless=args.headless,
-                                 delay=max(args.delay, 1.0),
-                                 workers=args.workers, limit=args.limit,
-                                 force_workers=args.force_workers)
+    scraper = MorningstarScraper(
+        args.out, headless=args.headless,
+        delay=max(args.delay, 1.0),
+        workers=args.workers, limit=args.limit,
+        force_workers=args.force_workers,
+        equity_holdings_only=args.equity_holdings_only,
+        recommendation_universe_only=args.recommendation_universe_only)
     scraper.run(houses=args.house, funds=args.fund,
                 direct_growth_only=args.direct_growth_only,
                 refresh_days=args.refresh_days)

@@ -124,6 +124,62 @@ def test_sector_effective_n():
     assert mf_recommend.sector_effective_n(one) == 1.0
 
 
+def test_holdings_coverage_complete_vs_truncated():
+    hc = mf_recommend.holdings_coverage
+    # complete: 3 declared, 3 scraped, weights sum to 100 -> not truncated
+    full = {"detailed_portfolio": {
+        "holdings_summary": {"Equity Holdings": "3"},
+        "holdings": {"Equity": [
+            {"Holdings": "A", "% Portfolio Weight": "40"},
+            {"Holdings": "B", "% Portfolio Weight": "35"},
+            {"Holdings": "C", "% Portfolio Weight": "25"}]}}}
+    c = hc(full)
+    assert c["truncated"] is False and c["unseen_weight_pct"] == 0.0
+    assert c["scraped"] == 3 and c["declared"] == 3
+    # a complete table whose weights sum < 100 (cash/derivatives) is NOT flagged
+    cash = {"detailed_portfolio": {
+        "holdings_summary": {"Equity Holdings": "1"},
+        "holdings": {"Equity": [{"Holdings": "A", "% Portfolio Weight": "95"}]}}}
+    assert hc(cash)["truncated"] is False and hc(cash)["unseen_weight_pct"] == 0.0
+    # truncated: 251 declared, 2 scraped summing to 70% -> 30% unseen
+    trunc = {"detailed_portfolio": {
+        "holdings_summary": {"Equity Holdings": "251"},
+        "holdings": {"Equity": [
+            {"Holdings": "A", "% Portfolio Weight": "40"},
+            {"Holdings": "B", "% Portfolio Weight": "30"}]}}}
+    ct = hc(trunc)
+    assert ct["truncated"] is True and ct["scraped"] == 2 and ct["declared"] == 251
+    assert ct["unseen_weight_pct"] == 30.0
+
+
+def test_overlap_upper_bound_is_rigorous():
+    ub = mf_recommend.overlap_upper_bound
+    # complete tables (unseen 0/0): upper == measured (only X shared: min=50)
+    a = {"X": 50.0, "Y": 50.0}
+    b = {"X": 50.0, "Z": 50.0}
+    assert ub(a, b, 0.0, 0.0) == 50.0 == mf_recommend.pairwise_overlap(a, b)
+    # the adversarial case: two funds each showing 50% on DISJOINT names could
+    # truly overlap 100% in their hidden tails -> bound must reach measured+100
+    assert ub({"X": 50.0}, {"Y": 50.0}, 50.0, 50.0) == 100.0
+    # partial one side only: measured + that side's unseen
+    assert ub({"X": 60.0, "Y": 40.0}, {"X": 60.0, "Z": 40.0}, 0.0, 20.0) == 80.0
+    # capped at 100
+    assert ub({"X": 100.0}, {"X": 100.0}, 40.0, 40.0) == 100.0
+
+
+def test_manual_verification_items_conditional_on_truncation():
+    mv = mf_recommend.manual_verification_items
+    complete = mv({"truncated": False})
+    assert len(complete) == 2                       # Sortino + tenure always
+    assert any("Sortino" in i for i in complete)
+    assert any("tenure" in i.lower() for i in complete)
+    assert not any("overlap" in i.lower() for i in complete)
+    truncated = mv({"truncated": True, "scraped": 99, "declared": 251,
+                    "scraped_weight_pct": 70.0})
+    assert len(truncated) == 3                       # + the overlap re-check
+    assert any("99/251" in i for i in truncated)
+
+
 def test_reason_contains_driving_numbers():
     m = {"horizon_used": "5Y", "alpha": 2.5, "alpha_cat": 1.0, "alpha_excess": 1.5,
          "worst_alpha_excess": 0.8, "alpha_consistency": 3, "alpha_horizons": 3,

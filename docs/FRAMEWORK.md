@@ -1,5 +1,14 @@
 # Deterministic Direct-MF Selection Framework (>10Y horizon)
 
+> **⚠ DORMANT.** This spec describes `mf_select.py`, which is **not part of the
+> live pipeline.** The live workflow is `morningstar_fund_details.py` →
+> `ms_data/` → `mf_recommend.py`; `mf_select.py` has never been fed data
+> (`mf_dataset/`, `benchmarks/`, `holdings/` are unpopulated) and is retained
+> only as (1) the math library `mf_recommend.py` imports and (2) the reference
+> Sortino / rolling-return implementation for a possible future NAV-based
+> revival. It is not a live verification step — running it today produces no
+> selection.
+
 Version 1.0.0 — companion spec for `mf_select.py`. Designed to sit on top of the
 `indian-mf-data` dataset layer (AMFI catalog + mfapi.in NAV histories) and slot
 into MFRecommendationEngine as the selection module.

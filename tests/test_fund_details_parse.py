@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper"))
 
 import morningstar_fund_details as fd  # noqa: E402
 
+# The recommendation engine lives in selection/; both it and its mf_select
+# helper import as top-level modules, so put that dir on the path too.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "selection"))
+
 
 # ---------------------------------------------------------------------------
 # derive_tab_urls
@@ -202,6 +206,56 @@ def test_allowed_workers_policy():
     assert aw(6, 0.7) == 0          # < 1 GB: full pause
     assert aw(1, 2.5) == 1          # half of 1 floors at 1
     assert aw(6, None) == 6         # unknown -> fail open (watchdog still alerts)
+
+
+def test_format_duration():
+    assert fd.format_duration(0) == "0:00"
+    assert fd.format_duration(75) == "1:15"
+    assert fd.format_duration(3675) == "1:01:15"
+    assert fd.format_duration(-5) == "0:00"       # clamped, never negative
+
+
+def test_format_progress():
+    # mid-run: the user's example — 128/390 after 2:15 -> eta 4:36 by rate
+    line = fd.format_progress("ENRICH", 128, 390, 2, 135)
+    assert "PROGRESS[ENRICH]: 128/390 (33%)" in line
+    assert "failed=2" in line and "elapsed=2:15" in line and "eta=4:36" in line
+    # completed: no eta
+    done = fd.format_progress("ENRICH", 390, 390, 2, 500)
+    assert "eta" not in done and "390/390 (100%)" in done
+    # not started: no eta, no div-by-zero
+    assert "eta" not in fd.format_progress("REPAIR1", 0, 5, 0, 0)
+    # landmark: `last` names the fund the checkpoint fired after; omitted by default
+    assert "last=" not in fd.format_progress("ENRICH", 10, 235, 0, 290)
+    assert "last=Axis Multicap Fund Direct Growth" in fd.format_progress(
+        "ENRICH", 10, 235, 0, 290, last="Axis Multicap Fund Direct Growth")
+
+
+def test_recommendation_universe_matches_engine():
+    """DRIFT GUARD: the scraper's --recommendation-universe-only allow-list
+    MUST equal the exact set of categories the engine scores (the union of its
+    four bucket lists). If the engine adds/renames a bucket category and this
+    test isn't updated, the scraper would silently stop enriching funds the
+    engine now wants — the one failure mode we must never allow."""
+    import mf_recommend as engine
+    engine_cats = set()
+    for cats in engine.DEFAULT_CONFIG["universe"]["buckets"].values():
+        engine_cats.update(cats)
+    assert fd.RECOMMENDATION_UNIVERSE_CATEGORIES == engine_cats, (
+        "scraper allow-list drifted from engine buckets: "
+        f"only-in-scraper={fd.RECOMMENDATION_UNIVERSE_CATEGORIES - engine_cats}, "
+        f"only-in-engine={engine_cats - fd.RECOMMENDATION_UNIVERSE_CATEGORIES}")
+
+
+def test_ram_capped_workers_policy():
+    rc = fd.ram_capped_workers
+    # 8 GB laptop with ~3 GB free: 6 requested -> 1 sustainable
+    assert rc(6, 3.0) == 1
+    assert rc(6, 3.5) == 2          # (3.5-1)/1.2 = 2.08 -> 2
+    assert rc(6, 8.5) == 6          # plenty of headroom: full request
+    assert rc(6, 0.8) == 1          # floors at 1 (governor handles pause)
+    assert rc(2, 16.0) == 2         # never raises above the request
+    assert rc(6, None) == 6         # unknown -> fail open
 
 
 def test_parse_vm_stat():
