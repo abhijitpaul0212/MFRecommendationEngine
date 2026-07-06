@@ -48,9 +48,9 @@ Inputs (prompted interactively when flags are omitted):
                             Stage 5 can reconstruct every installment.
 
 Usage:
-  python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+  python selection/mf_allocate.py --report recommendation_run/recommendations.json \
       --amount 1000000 --risk moderate --years 15                    # lumpsum
-  python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+  python selection/mf_allocate.py --report recommendation_run/recommendations.json \
       --amount 25000 --risk moderate --years 15 \
       --frequency sip --sip-day 5 --start-date 2026-07-05             # SIP
 

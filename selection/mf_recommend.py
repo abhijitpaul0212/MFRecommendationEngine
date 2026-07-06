@@ -52,7 +52,7 @@ Design contract (mirrors mf_select.py)
 
 Usage
 =====
-  python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+  python selection/mf_recommend.py --data ms_data --out recommendation_run
   python selection/mf_recommend.py --selftest
 """
 
@@ -1406,7 +1406,7 @@ def main():
     ap.add_argument("--data", default="ms_data",
                     help="dir of enriched per-house JSON files")
     ap.add_argument("--config", help="JSON overrides merged onto DEFAULT_CONFIG")
-    ap.add_argument("--out", default="ms_data/recommendation_run")
+    ap.add_argument("--out", default="recommendation_run")
     ap.add_argument("--no-history", action="store_true",
                     help="skip appending to <data>/metrics_history.jsonl")
     ap.add_argument("--exclude", action="append", default=[], metavar="FUND",

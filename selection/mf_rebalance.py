@@ -61,8 +61,8 @@ trades rather than being papered over. Not investment advice.
 Usage
 =====
   python selection/mf_rebalance.py \
-      --plan ms_data/recommendation_run/allocation_plan.json \
-      --report ms_data/recommendation_run/recommendations.json \
+      --plan recommendation_run/allocation_plan.json \
+      --report recommendation_run/recommendations.json \
       --data ms_data
   # options: --buy-date 2026-07-07  --sip-day 5  --as-of 2026-07-01
   #          --current 'Fund Name=1234567' (repeatable)

@@ -41,10 +41,10 @@ python selection/mf_recommend.py --selftest        # must print SELFTEST PASS
 
 # EXCLUSIONS starts empty (or from the user's known-bad list); then iterate:
 # ── Stage 2: recommend under current exclusions ──────────────────────────
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run \
+python selection/mf_recommend.py --data ms_data --out recommendation_run \
     --exclude '<fund 1>' --exclude '<fund 2>' ...
 # ── Stage 3: verify picks + bench against full NAV history ───────────────
-python selection/nav_rolling_check.py --report ms_data/recommendation_run/recommendations.json
+python selection/nav_rolling_check.py --report recommendation_run/recommendations.json
 ```
 
 Per Stage 3 verdict on a PICK:
@@ -89,10 +89,10 @@ and verdicts honestly instead of pushing further.
 
 ```bash
 # lumpsum
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount <N> --risk <profile> --years <Y>
 # SIP (amount = MONTHLY installment; schedule recorded for Stage 5)
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount <N> --risk <profile> --years <Y> \
     --frequency sip --sip-day <1-28> --start-date <YYYY-MM-DD>
 ```
@@ -109,7 +109,7 @@ ICICI Prudential Focused Equity Fund Direct Plan Growth
 → picks (all Stage 3 PASS): Canara Robeco Large Cap (core), Invesco India
 Mid Cap (growth), Axis Small Cap (aggressive); run_hash `92906f0b…`.
 SIP ₹25,000/mo, moderate, 15y, day 5 → 44% / 31% / 25% = ₹11,000 / ₹8,000 /
-₹6,000 (plan in `ms_data/recommendation_run/allocation_plan.json`).
+₹6,000 (plan in `recommendation_run/allocation_plan.json`).
 This is a RECORD of that snapshot, not an assumption: on any fresh snapshot,
 re-derive through the loop — start from the same exclusion list, but let the
 engine and Stage 3 speak for the new data.

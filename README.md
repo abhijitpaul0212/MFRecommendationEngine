@@ -50,23 +50,23 @@ python scraper/morningstar_fund_details.py --out ms_data --headless --workers 2 
     --recommendation-universe-only --refresh-days 30
 
 # 2. RECOMMEND from the snapshot (seconds; deterministic, offline)
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+python selection/mf_recommend.py --data ms_data --out recommendation_run
 
 # 3. VERIFY finalists against full NAV history (seconds; AMFI data, no browser)
-python selection/nav_rolling_check.py --report ms_data/recommendation_run/recommendations.json
+python selection/nav_rolling_check.py --report recommendation_run/recommendations.json
 
 # 4. ALLOCATE — your amount / risk / duration -> exact % + ₹ per fund
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount 1000000 --risk moderate --years 15   # omit flags to be prompted
 
 # 5. LATER, PERIODICALLY (e.g. annually) — REBALANCING AUDIT: re-run steps
 #    1-2 for a fresh snapshot first, then audit the live portfolio against
 #    the buy-time plan (drift) AND today's full quality machinery
-python selection/mf_rebalance.py --plan ms_data/recommendation_run/allocation_plan.json \
-    --report ms_data/recommendation_run/recommendations.json --data ms_data
+python selection/mf_rebalance.py --plan recommendation_run/allocation_plan.json \
+    --report recommendation_run/recommendations.json --data ms_data
 ```
 
-Then read `ms_data/recommendation_run/recommendations.md` — picks, scores,
+Then read `recommendation_run/recommendations.md` — picks, scores,
 reasons, the **bench** (pre-validated substitutes per pick), overlap matrix
 (with worst-case bounds), the per-fund **manual verification checklist**
 (Sortino top-quartile, manager tenure) — and the Stage 3 console verdicts.
@@ -75,7 +75,7 @@ a **pre-verified substitute** already sitting next to it. If the bench can't
 cover it (or you prefer a full constraint-checked rebuild), close the loop:
 
 ```bash
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run \
+python selection/mf_recommend.py --data ms_data --out recommendation_run \
     --exclude "the failed fund's exact name"     # repeatable
 # then re-run step 3 on the new report
 ```
@@ -106,7 +106,7 @@ detail pages. See [Data acquisition](#data-acquisition-the-single-canonical-scra
 | Argument | Default | What it does |
 |---|---|---|
 | `--data DIR` | `ms_data` | dir of enriched per-house JSON files (Stage 1 output) |
-| `--out DIR` | `ms_data/recommendation_run` | writes `recommendations.json` + `recommendations.md` |
+| `--out DIR` | `recommendation_run` | writes `recommendations.json` + `recommendations.md` |
 | `--config FILE` | — | JSON overrides merged onto `DEFAULT_CONFIG` (gates, weights, quotas, horizon) |
 | `--exclude FUND` | — | bar this fund from selection (repeatable, exact name) — still ranked, decision logged as `excluded_by_config`, hashed into `config_hash`. Use after a Stage 3 `FAIL` to rebuild the portfolio under full constraints |
 | `--no-history` | off | skip appending this run to `<data>/metrics_history.jsonl` |
@@ -336,7 +336,7 @@ python scraper/morningstar_fund_details.py --out ms_data --headless --workers 2 
 
 # STAGE 2 — RECOMMENDATION ENGINE (no browser, no network; deterministic)
 python selection/mf_recommend.py --selftest       # must print SELFTEST PASS
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+python selection/mf_recommend.py --data ms_data --out recommendation_run
 # -> recommendations.json (scores, gates, reasons, run_hash, bench of
 #    pre-validated substitutes per pick) + recommendations.md
 # -> ms_data/metrics_history.jsonl (one row per fund per run, appended and
@@ -348,7 +348,7 @@ python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
 # AMFI daily NAVs via api.mfapi.in; no browser). Closes the "lucky window"
 # gap: Stage 2 sees three point-in-time horizons, this recomputes CAGR over
 # EVERY rolling 3Y/5Y window in each finalist's full NAV history.
-python selection/nav_rolling_check.py --report ms_data/recommendation_run/recommendations.json
+python selection/nav_rolling_check.py --report recommendation_run/recommendations.json
 # Checks the PICKS and the report's BENCH substitutes in one pass (--no-bench
 # to skip the bench) -> per-fund PASS / FAIL / SHORT_HISTORY (young fund) /
 # INCOMPLETE_HISTORY (data issue) / UNRESOLVED verdicts;
@@ -365,11 +365,11 @@ python selection/nav_rolling_check.py --report ms_data/recommendation_run/recomm
 # Inputs: total amount + risk appetite + duration (flags or interactive
 # prompts). Output: exact % and amount per fund, from an explicit risk x
 # horizon template table -> allocation_plan.json + allocation_plan.md.
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount 1000000 --risk moderate --years 15                        # lumpsum
 # --frequency sip: --amount becomes the MONTHLY installment; --sip-day and
 # --start-date are recorded in the plan as the SIP contract Stage 5 replays:
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount 25000 --risk moderate --years 15 \
     --frequency sip --sip-day 5 --start-date 2026-07-05                # SIP
 # Honest guards: refuses durations under 5y (all-equity is wrong for short
@@ -379,8 +379,8 @@ python selection/mf_allocate.py --report ms_data/recommendation_run/recommendati
 
 # STAGE 5 — REBALANCING AUDIT (periodic, e.g. annually or on a market move).
 # Re-run Stages 1-2 first for a FRESH snapshot, then:
-python selection/mf_rebalance.py --plan ms_data/recommendation_run/allocation_plan.json \
-    --report ms_data/recommendation_run/recommendations.json --data ms_data
+python selection/mf_rebalance.py --plan recommendation_run/allocation_plan.json \
+    --report recommendation_run/recommendations.json --data ms_data
 # Reads the plan's own frequency/schedule automatically — lumpsum replays a
 # single buy date; SIP replays every monthly installment (sip_day +
 # sip_start_date) through today, each priced at ITS OWN historical NAV.
@@ -625,7 +625,7 @@ optimization work starts from the reasoning, not just the code.
 
 ```bash
 python selection/mf_recommend.py --selftest                       # SELFTEST PASS
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+python selection/mf_recommend.py --data ms_data --out recommendation_run
 ```
 
 ### Data dictionary — every scraped attribute and its job
@@ -959,7 +959,7 @@ selection — reproducible, hash-provable), **model judgment where valuable**
 **The process to follow after every recommendation run (runbook Stage 3):**
 
 ```bash
-python selection/nav_rolling_check.py --report ms_data/recommendation_run/recommendations.json
+python selection/nav_rolling_check.py --report recommendation_run/recommendations.json
 ```
 
 **Why this stage exists.** The Morningstar engine judges each fund on three
@@ -1041,12 +1041,12 @@ allocation and noted in the plan. `--step 1` restores rupee-exact splits.
 
 ```bash
 # lumpsum (default)
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount 1000000 --risk moderate --years 15
 
 # SIP: --amount is the MONTHLY installment; --sip-day/--start-date become
 # part of the plan's contract so Stage 5 can reconstruct every installment
-python selection/mf_allocate.py --report ms_data/recommendation_run/recommendations.json \
+python selection/mf_allocate.py --report recommendation_run/recommendations.json \
     --amount 25000 --risk moderate --years 15 \
     --frequency sip --sip-day 5 --start-date 2026-07-05
 ```
@@ -1105,8 +1105,8 @@ rebalance can never quietly keep funding a fund that no longer deserves it.
 
 ```bash
 # re-run Stages 1-2 first (fresh snapshot), then:
-python selection/mf_rebalance.py --plan ms_data/recommendation_run/allocation_plan.json \
-    --report ms_data/recommendation_run/recommendations.json --data ms_data
+python selection/mf_rebalance.py --plan recommendation_run/allocation_plan.json \
+    --report recommendation_run/recommendations.json --data ms_data
 ```
 
 **Trigger family 1 — DRIFT (arithmetic vs the plan).** The classic 5/25

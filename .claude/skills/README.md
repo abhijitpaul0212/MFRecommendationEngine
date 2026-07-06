@@ -58,12 +58,12 @@ print `SELFTEST PASS`), then the real run. To refresh recommendations at a
 future date, run `/morningstar-scrape` first, then this skill.
 
 **Expected output:**
-- `ms_data/recommendation_run/recommendations.json` — ranking with per-gate
+- `recommendation_run/recommendations.json` — ranking with per-gate
   checks, gate exclusions with named failed checks, recommendations with
   reasons, per-pick bench of pre-validated substitutes, overlap matrix (+
   worst-case upper bounds), and a manifest (`config_hash`, `input_hashes`,
   `run_hash`)
-- `ms_data/recommendation_run/recommendations.md` — human-readable summary
+- `recommendation_run/recommendations.md` — human-readable summary
 - An **empty recommendation list is a valid, honest outcome** (nothing passed
   the gates, or too few houses are enriched yet) — it is never padded.
 - Picks are NOT final until Stage 3 verifies them — see the agent below.

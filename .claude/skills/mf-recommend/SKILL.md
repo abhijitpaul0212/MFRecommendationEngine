@@ -59,7 +59,7 @@ source .venv/bin/activate           # ./setup.sh first if .venv is missing
 python selection/mf_recommend.py --selftest        # must print SELFTEST PASS
 
 # 2) run on the real snapshot
-python selection/mf_recommend.py --data ms_data --out ms_data/recommendation_run
+python selection/mf_recommend.py --data ms_data --out recommendation_run
 #    add --exclude 'Fund Name' (repeatable) after a Stage 3 FAIL to rebuild
 #    the portfolio under full constraints (closed loop)
 
@@ -94,7 +94,7 @@ same analysis to the user in the chat response.
 
 ## Expected output
 
-- `ms_data/recommendation_run/recommendations.json` — full report:
+- `recommendation_run/recommendations.json` — full report:
   `ranking` (every universe fund with metrics + per-gate checks),
   `excluded_by_gates` (with the exact failed checks),
   `recommendations` (picks with score, bucket and `recommendation_reason`),
@@ -105,8 +105,8 @@ same analysis to the user in the chat response.
   `manual_verification_note`, `notes_and_caveats`, and a manifest
   (`engine_version`, `config_hash`, `input_hashes` per house file,
   `run_hash`, `generated_at`).
-- `ms_data/recommendation_run/recommendations.md` — human-readable summary.
-- `ms_data/recommendation_run/model_judgment.md` — the model-judgment layer
+- `recommendation_run/recommendations.md` — human-readable summary.
+- `recommendation_run/model_judgment.md` — the model-judgment layer
   (see above), bound to the run_hash it interprets.
 - Console prints universe size, gates passed, picks and the run_hash.
 
