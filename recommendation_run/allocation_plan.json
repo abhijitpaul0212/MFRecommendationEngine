@@ -1,0 +1,52 @@
+{
+  "allocation": [
+    {
+      "amount_inr": 4000,
+      "bucket": "aggressive",
+      "category": "Small-Cap",
+      "fund": "Axis Small Cap Fund Direct Growth",
+      "fund_house": "Axis_Asset_Management_Company_Limited",
+      "pct": 19
+    },
+    {
+      "amount_inr": 10000,
+      "bucket": "core",
+      "category": "Flexi Cap",
+      "fund": "Parag Parikh Flexi Cap Direct Growth",
+      "fund_house": "PPFAS_Asset_Management_Pvt_Ltd",
+      "pct": 50
+    },
+    {
+      "amount_inr": 6000,
+      "bucket": "growth",
+      "category": "Mid-Cap",
+      "fund": "Invesco India Mid Cap Fund Direct Plan Growth Option",
+      "fund_house": "Invesco_Asset_Management_India_Private_Ltd",
+      "pct": 31
+    }
+  ],
+  "bucket_weights_used": {
+    "aggressive": 15,
+    "core": 40,
+    "diversifier": 20,
+    "growth": 25
+  },
+  "generated_at": "2026-07-07T18:50:32.707379+00:00",
+  "inputs": {
+    "amount_inr": 20000,
+    "amount_step_inr": 1000,
+    "duration_years": 12.0,
+    "frequency": "sip",
+    "horizon_band": "10-15y",
+    "risk": "moderate",
+    "sip_day": 2,
+    "sip_start_date": "2026-08-02"
+  },
+  "note": "Deterministic arithmetic over your own inputs — not investment advice. Weights come from the explicit risk x horizon template table in mf_allocate.py; amounts sum exactly to the input (each fund's amount is its RECURRING monthly SIP installment, debited on day 2 of each month starting 2026-08-02 — Stage 5 reconstructs the full installment history from this contract). Review the per-fund manual verification checklist in recommendations.md before placing orders, and rebalance ~annually.",
+  "plan_hash": "462906a173faaa095ba97b039bfc112c66a10c7bd7014df78529467fe8740920",
+  "source_report_run_hash": "05a33e329751ba69061e2257afbe909b83fc437b12e7db671a7c1f9662b9e964",
+  "warnings": [
+    "unfilled bucket(s) ['diversifier']: their 20.0% weight was redistributed proportionally across the filled buckets",
+    "'Parag Parikh Flexi Cap Direct Growth' takes 50% (> 40.0% concentration line) — a consequence of unfilled bucket slots; consider completing the portfolio before investing the full amount"
+  ]
+}

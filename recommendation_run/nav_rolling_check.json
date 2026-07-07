@@ -1,0 +1,249 @@
+{
+  "generated_at": "2026-07-07T18:16:17.074611+00:00",
+  "note": "Live-data second opinion on the engine's finalists — NAVs update daily, so this is reproducible per download (see payload_sha256 + date range per fund), not across days. A pick FAIL: use a PASSing bench substitute from the same pick's bench (already verified here), or re-run the engine with --exclude 'failed fund' for a full re-selection. Bench verdicts never affect the exit code.",
+  "results": [
+    {
+      "first_date": "2013-05-28",
+      "fund": "Parag Parikh Flexi Cap Direct Growth",
+      "history_note": null,
+      "history_years": 13.106092,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 3222,
+      "note": null,
+      "payload_sha256": "9a65b8e399d182ee8984770caa820ce2f9e6637eb08aebdfb09e2e0daabc7eaf",
+      "points_per_year": 245.839874,
+      "role": "pick",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 100.0,
+        "threshold_min": 90.0,
+        "windows": 124
+      },
+      "rolling5y": {
+        "median_cagr": 0.188601,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 99,
+        "worst_cagr": 0.063585
+      },
+      "scheme_code": "122639",
+      "scheme_name": "Parag Parikh Flexi Cap Fund - Direct Plan - Growth",
+      "sortino_5y": 0.985329,
+      "source": "https://api.mfapi.in/mf/122639",
+      "verdict": "PASS"
+    },
+    {
+      "first_date": "2013-01-02",
+      "fund": "Invesco India Mid Cap Fund Direct Plan Growth Option",
+      "history_note": null,
+      "history_years": 13.505818,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 3322,
+      "note": null,
+      "payload_sha256": "e630e57c2695ed3c8b550e9995e87d467dc29fb4dce6decabfc4ff5234aa6028",
+      "points_per_year": 245.968071,
+      "role": "pick",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 100.0,
+        "threshold_min": 90.0,
+        "windows": 128
+      },
+      "rolling5y": {
+        "median_cagr": 0.173876,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 104,
+        "worst_cagr": 0.040502
+      },
+      "scheme_code": "120357",
+      "scheme_name": "Invesco India Large & Mid Cap Fund - Direct Plan - Growth",
+      "sortino_5y": 1.159996,
+      "source": "https://api.mfapi.in/mf/120357",
+      "verdict": "PASS"
+    },
+    {
+      "first_date": "2013-12-05",
+      "fund": "Axis Small Cap Fund Direct Growth",
+      "history_note": null,
+      "history_years": 12.583162,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 3101,
+      "note": null,
+      "payload_sha256": "a1f2001e66b8145bc1606e382f673236cefa6d0b29ae3780fdbe128e00cfc47e",
+      "points_per_year": 246.440442,
+      "role": "pick",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 100.0,
+        "threshold_min": 90.0,
+        "windows": 117
+      },
+      "rolling5y": {
+        "median_cagr": 0.216621,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 93,
+        "worst_cagr": 0.053165
+      },
+      "scheme_code": "125354",
+      "scheme_name": "Axis Small Cap Fund - Direct Plan - Growth",
+      "sortino_5y": 1.057928,
+      "source": "https://api.mfapi.in/mf/125354",
+      "verdict": "PASS"
+    },
+    {
+      "first_date": "2020-11-19",
+      "fund": "Mahindra Manulife Focused Fund Direct Growth",
+      "history_note": "fund has 5.626283y of complete daily NAVs (< 7y needed for rolling 5Y windows) — a genuinely young fund, not a data gap; it is simply unproven over a full market cycle, so decide manually whether to accept it",
+      "history_years": 5.626283,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 1384,
+      "note": null,
+      "payload_sha256": "f982852890b78024250500a86a1441f7792ec39e2c42b2dc0e9c3ff88cdd0824",
+      "points_per_year": 245.988337,
+      "role": "bench for Parag Parikh Flexi Cap Direct Growth",
+      "rolling3y": null,
+      "rolling5y": null,
+      "scheme_code": "148567",
+      "scheme_name": "Mahindra Manulife Focused Fund - Direct Plan -Growth",
+      "sortino_5y": null,
+      "source": "https://api.mfapi.in/mf/148567",
+      "verdict": "SHORT_HISTORY"
+    },
+    {
+      "first_date": "2022-12-02",
+      "fund": "WhiteOak Capital Large Cap Fund Direct Growth",
+      "history_note": "fund has 3.59206y of complete daily NAVs (< 7y needed for rolling 5Y windows) — a genuinely young fund, not a data gap; it is simply unproven over a full market cycle, so decide manually whether to accept it",
+      "history_years": 3.59206,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 882,
+      "note": null,
+      "payload_sha256": "dc1270d7e21d19d040fc1f168a859e2bf2ebf97b3aa09af28eb16f8d1bd88e98",
+      "points_per_year": 245.541556,
+      "role": "bench for Parag Parikh Flexi Cap Direct Growth",
+      "rolling3y": null,
+      "rolling5y": null,
+      "scheme_code": "150797",
+      "scheme_name": "WhiteOak Capital Large Cap Fund Direct Plan Growth",
+      "sortino_5y": null,
+      "source": "https://api.mfapi.in/mf/150797",
+      "verdict": "SHORT_HISTORY"
+    },
+    {
+      "fund": "Nippon India Growth Mid Cap Fund - Direct Plan Bonus Plan - Bonus",
+      "note": "no confident Direct-Growth match; candidates: none — re-run with --map 'Fund Name=schemeCode'",
+      "payload_sha256": null,
+      "role": "bench for Invesco India Mid Cap Fund Direct Plan Growth Option",
+      "scheme_code": null,
+      "scheme_name": null,
+      "source": null,
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "first_date": "2013-01-02",
+      "fund": "Nippon India Growth Mid Cap Fund - Direct Plan - Growth Mid Cap",
+      "history_note": null,
+      "history_years": 13.505818,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 3322,
+      "note": null,
+      "payload_sha256": "4150eefc04715500cbd838401883b7a286a970a2578a4cbfce52e10dabe27106",
+      "points_per_year": 245.968071,
+      "role": "bench for Invesco India Mid Cap Fund Direct Plan Growth Option",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 97.65625,
+        "threshold_min": 90.0,
+        "windows": 128
+      },
+      "rolling5y": {
+        "median_cagr": 0.185815,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 104,
+        "worst_cagr": 0.014271
+      },
+      "scheme_code": "118668",
+      "scheme_name": "Nippon India Growth Mid Cap Fund - Direct Plan Growth Plan - Growth Option",
+      "sortino_5y": 1.219469,
+      "source": "https://api.mfapi.in/mf/118668",
+      "verdict": "PASS"
+    },
+    {
+      "first_date": "2013-01-02",
+      "fund": "Nippon India Small Cap Fund - Direct Plan - Growth Plan",
+      "history_note": null,
+      "history_years": 13.505818,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 3321,
+      "note": null,
+      "payload_sha256": "2112b2834247957f44b9db2c26512329a7acb4b0ef8f824225c7c1ed4cea5c8f",
+      "points_per_year": 245.894029,
+      "role": "bench for Axis Small Cap Fund Direct Growth",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 95.3125,
+        "threshold_min": 90.0,
+        "windows": 128
+      },
+      "rolling5y": {
+        "median_cagr": 0.233454,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 104,
+        "worst_cagr": 0.034702
+      },
+      "scheme_code": "118778",
+      "scheme_name": "Nippon India Small Cap Fund - Direct Plan Growth Plan - Growth Option",
+      "sortino_5y": 1.147054,
+      "source": "https://api.mfapi.in/mf/118778",
+      "verdict": "PASS"
+    },
+    {
+      "first_date": "2019-02-14",
+      "fund": "Edelweiss Small Cap Fund Direct Growth",
+      "history_note": null,
+      "history_years": 7.389459,
+      "last_date": "2026-07-06",
+      "last_nav_age_days": 1,
+      "nav_points": 1819,
+      "note": null,
+      "payload_sha256": "17281c6869459b2dc1b2ada8e74cd2534a35d565eff74e84fcf47c8aaa486743",
+      "points_per_year": 246.161458,
+      "role": "bench for Axis Small Cap Fund Direct Growth",
+      "rolling3y": {
+        "passed": true,
+        "pct_positive": 100.0,
+        "threshold_min": 90.0,
+        "windows": 54
+      },
+      "rolling5y": {
+        "median_cagr": 0.315818,
+        "passed": true,
+        "threshold_min": 0.0,
+        "windows": 30,
+        "worst_cagr": 0.189427
+      },
+      "scheme_code": "146196",
+      "scheme_name": "Edelweiss Small Cap Fund - Direct Plan - Growth",
+      "sortino_5y": 1.063997,
+      "source": "https://api.mfapi.in/mf/146196",
+      "verdict": "PASS"
+    }
+  ],
+  "source": "AMFI daily NAVs via api.mfapi.in",
+  "thresholds": {
+    "min_history_years": 7,
+    "risk_free_rate": 0.065,
+    "rolling3y_pct_positive_min": 90.0,
+    "rolling5y_worst_min": 0.0
+  }
+}
