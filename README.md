@@ -33,6 +33,7 @@
 - [Manual-verification gate: Sortino + manager team via Value Research](#manual-verification-gate-sortino--manager-team-via-value-research-valueresearchpy)
 - [Allocation planner: amount / risk / duration → exact breakdown](#allocation-planner-amount--risk--duration--exact-breakdown-mf_allocatepy)
 - [Rebalancing audit: drift + full quality re-check](#rebalancing-audit-drift--full-quality-re-check-mf_rebalancepy)
+  - [Notes for the rebalancing cycle (portfolio-specific)](#notes-for-the-rebalancing-cycle-portfolio-specific-2026-07-08)
 - [Dormant alternate engine: NAV-based deterministic selection](#dormant-alternate-engine-nav-based-deterministic-selection-mf_selectpy)
 - [Claude skills & agents](#claude-skills--agents)
 
@@ -1283,6 +1284,41 @@ in both `rebalance_plan.json` and the human-readable `rebalance_plan.md`.
 The output records the source plan's `plan_hash`, the fresh report's
 `run_hash`, NAV payload hashes, and its own `rebalance_hash` — the same
 reproducibility contract as every other stage.
+
+### Notes for the rebalancing cycle (portfolio-specific, 2026-07-08)
+
+Standing decisions on the current verified ladder (Parag Parikh Flexi Cap /
+Invesco India Mid Cap / Axis Small Cap), to re-open at the next Stage 5 run.
+Re-run Stages 1–3 for a fresh snapshot first — figures below are from the
+2026-07 data and will move.
+
+**Aggressive slot — Axis vs the pre-vetted alternatives.** Axis Small Cap was
+KEPT deliberately for capital preservation. If a future cycle prioritises
+alpha / manager tenure over crash resilience, the analysis is already done:
+
+| Candidate | Stage 3.5 verdict | Sortino (cat 1.03) | Manager | Down-capture / max drawdown / recovery |
+|---|---|---|---|---|
+| **Axis Small Cap** (held) | REVIEW | 0.95 (lags cat) | Hyanki 2.9y | **55 / −30% / 2 mo** — best downside |
+| **Nippon India Small Cap** | **VERIFIED** | **1.03** (meets cat) | **Rachh 9.5y** | 75 / −42% / 27 mo — higher alpha, deeper falls |
+| SBI Small Cap | REJECT | 0.80 (below benchmark) | Srinivasan 12.6y | 67 / −33% / 27 mo |
+| HDFC Small Cap | REJECT | 0.74 (below benchmark) | Setalvad 12.0y | 72 / −44% / 23 mo |
+
+- **Nippon** is the only VERIFIED upgrade (clears the Sortino gate Axis flags,
+  veteran manager) — the swap is `--exclude 'Axis Small Cap Fund Direct Growth'`
+  then re-run Stages 2→3→4; cost is materially deeper drawdowns.
+- **SBI / HDFC are ruled out** by the manual gate: their recent 5Y Sortino is
+  below their own benchmark. Their "downside specialist" / "capital protection"
+  narratives are NOT supported by the drawdown data (SBI recovers slowly; HDFC
+  has the deepest drawdown, worse than the category). Tenured managers don't
+  rescue a sub-benchmark risk-adjusted profile.
+- **Recency caveat:** the Stage 3.5 Sortino is a recent-5Y ratio; SBI in
+  particular has the best *long-term* rolling record (Stage 3 worst-5Y +0.079).
+  Weigh both if reconsidering.
+
+**Open allocation choices** (funds are settled): horizon is recorded at 12y
+(50 / 31 / 19); a 15y setting gives the less core-heavy 44 / 31 / 25. Plan is
+currently `lumpsum` — switch to `--frequency sip` (with `--sip-day` /
+`--start-date`) if investing monthly, so Stage 5 can replay installments.
 
 ## Dormant alternate engine: NAV-based deterministic selection (`mf_select.py`)
 
