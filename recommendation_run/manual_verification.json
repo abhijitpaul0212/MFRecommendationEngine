@@ -1,0 +1,126 @@
+{
+  "manual_verification": {
+    "as_of": "2026-07-07",
+    "verified_by": "valueresearch.py (live)",
+    "run_hash": "47720418368f39040575ffba10a87dafd6789eaaf12a8a094b31cedaa920fe78",
+    "sources": [
+      "Value Research Online #risk + #other (live Playwright fetch)"
+    ],
+    "funds": [
+      {
+        "fund": "Parag Parikh Flexi Cap Direct Growth",
+        "bucket": "core",
+        "sortino": {
+          "fund": 1.19,
+          "benchmark": 0.61,
+          "category": 0.74,
+          "benchmark_name": "BSE 500 TRI",
+          "category_name": "Equity: Flexi Cap"
+        },
+        "manager": {
+          "name": "Rajeev Thakkar",
+          "since": "2013-05-13",
+          "experience_note": "team of 6; primary listed: Rajeev Thakkar (since 2013-05-13, 13.15y). He has been associated with PPFAS AMC since 2013.",
+          "team_size": 6,
+          "primary": {
+            "name": "Rajeev Thakkar",
+            "since": "2013-05-13"
+          },
+          "team": [
+            {
+              "name": "Rajeev Thakkar",
+              "since": "2013-05-13",
+              "tenure_years": 13.15
+            },
+            {
+              "name": "Raj Mehta",
+              "since": "2016-01-27",
+              "tenure_years": 10.44
+            },
+            {
+              "name": "Rukun Tarachandani",
+              "since": "2022-05-16",
+              "tenure_years": 4.14
+            },
+            {
+              "name": "Aishwarya Dhar",
+              "since": "2025-09-01",
+              "tenure_years": 0.85
+            },
+            {
+              "name": "Mansi Kariya",
+              "since": "2023-12-22",
+              "tenure_years": 2.54
+            },
+            {
+              "name": "Tejas Soman",
+              "since": "2025-09-01",
+              "tenure_years": 0.85
+            }
+          ]
+        }
+      },
+      {
+        "fund": "Invesco India Mid Cap Fund Direct Plan Growth Option",
+        "bucket": "growth",
+        "sortino": {
+          "fund": 1.24,
+          "benchmark": 0.99,
+          "category": 1.03,
+          "benchmark_name": "BSE 150 MidCap TRI",
+          "category_name": "Equity: Mid Cap"
+        },
+        "manager": {
+          "name": "Aditya Khemani",
+          "since": "2023-11-09",
+          "experience_note": "team of 1; primary listed: Aditya Khemani (since 2023-11-09, 2.66y). Prior to joining Invesco Mutual Fund, He was associated with Motilal Oswal Mutual Fund, HSBC AMC, SBI Mutual Fund, ICICI Prudential AMC and Morgan Stanley Advantage Services.",
+          "team_size": 1,
+          "primary": {
+            "name": "Aditya Khemani",
+            "since": "2023-11-09"
+          },
+          "team": [
+            {
+              "name": "Aditya Khemani",
+              "since": "2023-11-09",
+              "tenure_years": 2.66
+            }
+          ]
+        }
+      },
+      {
+        "fund": "Axis Small Cap Fund Direct Growth",
+        "bucket": "aggressive",
+        "sortino": {
+          "fund": 0.95,
+          "benchmark": 0.92,
+          "category": 1.03,
+          "benchmark_name": "BSE 250 SmallCap TRI",
+          "category_name": "Equity: Small Cap"
+        },
+        "manager": {
+          "name": "Mayank Hyanki",
+          "since": "2023-08-03",
+          "experience_note": "team of 2; primary listed: Mayank Hyanki (since 2023-08-03, 2.93y). Prior to joining Axis Mutual Fund, he has worked with Reliance, Birla Sun Life Asset Management Company Ltd and ING Investment Management (I) Pvt Ltd",
+          "team_size": 2,
+          "primary": {
+            "name": "Mayank Hyanki",
+            "since": "2023-08-03"
+          },
+          "team": [
+            {
+              "name": "Mayank Hyanki",
+              "since": "2023-08-03",
+              "tenure_years": 2.93
+            },
+            {
+              "name": "Tejas Sheth",
+              "since": "2024-05-13",
+              "tenure_years": 2.15
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

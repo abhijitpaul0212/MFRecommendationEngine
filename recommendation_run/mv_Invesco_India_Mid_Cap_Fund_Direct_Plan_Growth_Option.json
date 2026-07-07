@@ -1,0 +1,61 @@
+{
+  "fund": "Invesco India Mid Cap Fund Direct Plan Growth Option",
+  "bucket": "growth",
+  "sortino": {
+    "fund": 1.24,
+    "benchmark": 0.99,
+    "category": 1.03,
+    "benchmark_name": "BSE 150 MidCap TRI",
+    "category_name": "Equity: Mid Cap"
+  },
+  "manager": {
+    "name": "Aditya Khemani",
+    "since": "2023-11-09",
+    "experience_note": "team of 1; primary listed: Aditya Khemani (since 2023-11-09, 2.66y). Prior to joining Invesco Mutual Fund, He was associated with Motilal Oswal Mutual Fund, HSBC AMC, SBI Mutual Fund, ICICI Prudential AMC and Morgan Stanley Advantage Services.",
+    "team_size": 1,
+    "primary": {
+      "name": "Aditya Khemani",
+      "since": "2023-11-09"
+    },
+    "team": [
+      {
+        "name": "Aditya Khemani",
+        "since": "2023-11-09",
+        "tenure_years": 2.66
+      }
+    ]
+  },
+  "_source": {
+    "url": "https://www.valueresearchonline.com/funds/16807/invesco-india-mid-cap-fund-direct-plan/",
+    "as_of": "2026-07-07",
+    "risk": {
+      "fund": {
+        "name": "Invesco India Mid cap Dir",
+        "mean": 25.61,
+        "std": 19.57,
+        "sharpe": 1.01,
+        "sortino": 1.24,
+        "beta": 1.02,
+        "alpha": 5.95
+      },
+      "benchmark": {
+        "name": "BSE 150 MidCap TRI",
+        "mean": 19.41,
+        "std": 18.06,
+        "sharpe": 0.75,
+        "sortino": 0.99,
+        "beta": null,
+        "alpha": null
+      },
+      "category": {
+        "name": "Equity: Mid Cap",
+        "mean": 19.94,
+        "std": 17.88,
+        "sharpe": 0.79,
+        "sortino": 1.03,
+        "beta": 0.96,
+        "alpha": 1.11
+      }
+    }
+  }
+}

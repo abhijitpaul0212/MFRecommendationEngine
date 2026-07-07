@@ -1,0 +1,66 @@
+{
+  "fund": "Axis Small Cap Fund Direct Growth",
+  "bucket": "aggressive",
+  "sortino": {
+    "fund": 0.95,
+    "benchmark": 0.92,
+    "category": 1.03,
+    "benchmark_name": "BSE 250 SmallCap TRI",
+    "category_name": "Equity: Small Cap"
+  },
+  "manager": {
+    "name": "Mayank Hyanki",
+    "since": "2023-08-03",
+    "experience_note": "team of 2; primary listed: Mayank Hyanki (since 2023-08-03, 2.93y). Prior to joining Axis Mutual Fund, he has worked with Reliance, Birla Sun Life Asset Management Company Ltd and ING Investment Management (I) Pvt Ltd",
+    "team_size": 2,
+    "primary": {
+      "name": "Mayank Hyanki",
+      "since": "2023-08-03"
+    },
+    "team": [
+      {
+        "name": "Mayank Hyanki",
+        "since": "2023-08-03",
+        "tenure_years": 2.93
+      },
+      {
+        "name": "Tejas Sheth",
+        "since": "2024-05-13",
+        "tenure_years": 2.15
+      }
+    ]
+  },
+  "_source": {
+    "url": "https://www.valueresearchonline.com/funds/22335/axis-small-cap-fund-direct-plan/",
+    "as_of": "2026-07-07",
+    "risk": {
+      "fund": {
+        "name": "Axis Small Cap Dir",
+        "mean": 17.28,
+        "std": 16.83,
+        "sharpe": 0.68,
+        "sortino": 0.95,
+        "beta": 0.74,
+        "alpha": 1.81
+      },
+      "benchmark": {
+        "name": "BSE 250 SmallCap TRI",
+        "mean": 18.79,
+        "std": 22.04,
+        "sharpe": 0.59,
+        "sortino": 0.92,
+        "beta": null,
+        "alpha": null
+      },
+      "category": {
+        "name": "Equity: Small Cap",
+        "mean": 19.88,
+        "std": 20.33,
+        "sharpe": 0.69,
+        "sortino": 1.03,
+        "beta": 0.9,
+        "alpha": 2.42
+      }
+    }
+  }
+}

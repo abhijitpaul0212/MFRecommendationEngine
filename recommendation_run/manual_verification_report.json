@@ -1,0 +1,66 @@
+{
+  "as_of": "2026-07-07",
+  "verified_run_hash": "47720418368f39040575ffba10a87dafd6789eaaf12a8a094b31cedaa920fe78",
+  "rows": [
+    {
+      "fund": "Parag Parikh Flexi Cap Direct Growth",
+      "bucket": "core",
+      "sortino_check": {
+        "status": "PASS",
+        "detail": "Sortino 1.19 beats both benchmark 0.61 and category 0.74",
+        "fund": 1.19,
+        "benchmark": 0.61,
+        "category": 0.74
+      },
+      "manager_check": {
+        "status": "STRONG",
+        "detail": "13.15y running the scheme (>= 5.0y — owns a full cycle)",
+        "name": "Rajeev Thakkar",
+        "since": "2013-05-13",
+        "tenure_years": 13.15
+      },
+      "verdict": "VERIFIED"
+    },
+    {
+      "fund": "Axis Small Cap Fund Direct Growth",
+      "bucket": "aggressive",
+      "sortino_check": {
+        "status": "FLAG",
+        "detail": "Sortino 0.95 beats the benchmark 0.92 but LAGS the category average 1.03 — mediocre among its peers",
+        "fund": 0.95,
+        "benchmark": 0.92,
+        "category": 1.03
+      },
+      "manager_check": {
+        "status": "CAUTION",
+        "detail": "2.93y running the scheme (< 3.0y — short) (mitigant: team of 2; primary listed: Mayank Hyanki (since 2023-08-03, 2.93y). Prior to joining Axis Mutual Fund, he has worked with Reliance, Birla Sun Life Asset Management Company Ltd and ING Investment Management (I) Pvt Ltd)",
+        "name": "Mayank Hyanki",
+        "since": "2023-08-03",
+        "tenure_years": 2.93
+      },
+      "verdict": "REVIEW"
+    },
+    {
+      "fund": "Invesco India Mid Cap Fund Direct Plan Growth Option",
+      "bucket": "growth",
+      "sortino_check": {
+        "status": "PASS",
+        "detail": "Sortino 1.24 beats both benchmark 0.99 and category 1.03",
+        "fund": 1.24,
+        "benchmark": 0.99,
+        "category": 1.03
+      },
+      "manager_check": {
+        "status": "CAUTION",
+        "detail": "2.66y running the scheme (< 3.0y — short) (mitigant: team of 1; primary listed: Aditya Khemani (since 2023-11-09, 2.66y). Prior to joining Invesco Mutual Fund, He was associated with Motilal Oswal Mutual Fund, HSBC AMC, SBI Mutual Fund, ICICI Prudential AMC and Morgan Stanley Advantage Services.)",
+        "name": "Aditya Khemani",
+        "since": "2023-11-09",
+        "tenure_years": 2.66
+      },
+      "verdict": "REVIEW"
+    }
+  ],
+  "portfolio_verdict": "REVIEW",
+  "clean": false,
+  "manual_hash": "1c8104ece0b78017fa5d0e56c2940e4e586d862f1b756aae9ecdb0e0f79e0206"
+}

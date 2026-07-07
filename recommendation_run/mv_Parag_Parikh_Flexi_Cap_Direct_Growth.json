@@ -1,0 +1,86 @@
+{
+  "fund": "Parag Parikh Flexi Cap Direct Growth",
+  "bucket": "core",
+  "sortino": {
+    "fund": 1.19,
+    "benchmark": 0.61,
+    "category": 0.74,
+    "benchmark_name": "BSE 500 TRI",
+    "category_name": "Equity: Flexi Cap"
+  },
+  "manager": {
+    "name": "Rajeev Thakkar",
+    "since": "2013-05-13",
+    "experience_note": "team of 6; primary listed: Rajeev Thakkar (since 2013-05-13, 13.15y). He has been associated with PPFAS AMC since 2013.",
+    "team_size": 6,
+    "primary": {
+      "name": "Rajeev Thakkar",
+      "since": "2013-05-13"
+    },
+    "team": [
+      {
+        "name": "Rajeev Thakkar",
+        "since": "2013-05-13",
+        "tenure_years": 13.15
+      },
+      {
+        "name": "Raj Mehta",
+        "since": "2016-01-27",
+        "tenure_years": 10.44
+      },
+      {
+        "name": "Rukun Tarachandani",
+        "since": "2022-05-16",
+        "tenure_years": 4.14
+      },
+      {
+        "name": "Aishwarya Dhar",
+        "since": "2025-09-01",
+        "tenure_years": 0.85
+      },
+      {
+        "name": "Mansi Kariya",
+        "since": "2023-12-22",
+        "tenure_years": 2.54
+      },
+      {
+        "name": "Tejas Soman",
+        "since": "2025-09-01",
+        "tenure_years": 0.85
+      }
+    ]
+  },
+  "_source": {
+    "url": "https://www.valueresearchonline.com/funds/19701/parag-parikh-flexi-cap-fund-direct-plan/",
+    "as_of": "2026-07-07",
+    "risk": {
+      "fund": {
+        "name": "Parag Parikh Flexi Cap Dir",
+        "mean": 14.22,
+        "std": 9.93,
+        "sharpe": 0.85,
+        "sortino": 1.19,
+        "beta": 0.6,
+        "alpha": 4.07
+      },
+      "benchmark": {
+        "name": "BSE 500 TRI",
+        "mean": 13.01,
+        "std": 15.3,
+        "sharpe": 0.47,
+        "sortino": 0.61,
+        "beta": null,
+        "alpha": null
+      },
+      "category": {
+        "name": "Equity: Flexi Cap",
+        "mean": 14.45,
+        "std": 15.34,
+        "sharpe": 0.56,
+        "sortino": 0.74,
+        "beta": 0.96,
+        "alpha": 1.74
+      }
+    }
+  }
+}
