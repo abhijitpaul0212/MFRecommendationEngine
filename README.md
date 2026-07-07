@@ -30,6 +30,7 @@
   - [Model-judgment layer](#model-judgment-layer-on-top-of-the-deterministic-core)
   - [Version history / future hooks](#version-history--future-hooks)
 - [Post-engine verification: NAV rolling-return check](#post-engine-verification-nav-rolling-return-check-nav_rolling_checkpy)
+- [Manual-verification gate: Sortino + manager team via Value Research](#manual-verification-gate-sortino--manager-team-via-value-research-valueresearchpy)
 - [Allocation planner: amount / risk / duration → exact breakdown](#allocation-planner-amount--risk--duration--exact-breakdown-mf_allocatepy)
 - [Rebalancing audit: drift + full quality re-check](#rebalancing-audit-drift--full-quality-re-check-mf_rebalancepy)
 - [Dormant alternate engine: NAV-based deterministic selection](#dormant-alternate-engine-nav-based-deterministic-selection-mf_selectpy)
@@ -54,6 +55,17 @@ python selection/mf_recommend.py --data ms_data --out recommendation_run
 
 # 3. VERIFY finalists against full NAV history (seconds; AMFI data, no browser)
 python selection/nav_rolling_check.py --report recommendation_run/recommendations.json
+
+# 3.5 MANUAL-VERIFICATION GATE (optional): fetch Sortino + the full manager
+#     team from Value Research (the two things Morningstar can't scrape), then
+#     apply fixed thresholds -> VERIFIED / REVIEW / WEAK / REJECT per fund.
+python scraper/valueresearch.py --playwright --no-headless \
+    --url "https://www.valueresearchonline.com/funds/<id>/<slug>/" \
+    --name "<fund name as in the report>" --bucket <bucket> --as-of 2026-07-07 \
+    --out recommendation_run/mv_<fund>.json          # repeat per pick, then merge
+python selection/manual_verify.py --input recommendation_run/manual_verification.json \
+    --report recommendation_run/recommendations.json \
+    --out recommendation_run/manual_verification_report.json
 
 # 4. ALLOCATE — your amount / risk / duration -> exact % + ₹ per fund
 python selection/mf_allocate.py --report recommendation_run/recommendations.json \
@@ -129,6 +141,42 @@ Verdicts: `PASS` / `FAIL` / `SHORT_HISTORY` (genuinely young fund) /
 `0` only if all **picks** pass — bench verdicts are contingency information
 and never fail the run. See
 [Post-engine verification](#post-engine-verification-nav-rolling-return-check-nav_rolling_checkpy).
+
+### 3.5 Manual-verification gate — all arguments
+
+`scraper/valueresearch.py` fetches the two things Morningstar can't scrape —
+**Sortino** (fund / benchmark / category) and the **full fund-manager team** —
+and emits a `funds[]` entry; `selection/manual_verify.py` applies fixed
+thresholds and returns a per-fund verdict. Full write-up:
+[Manual-verification gate](#manual-verification-gate-sortino--manager-team-via-value-research-valueresearchpy).
+
+`scraper/valueresearch.py`:
+
+| Argument | Default | What it does |
+|---|---|---|
+| `--url URL` \| `--fund-id N` | (one required) | the fund's Value Research page (or numeric id) |
+| `--html-file FILE` | — | parse saved page HTML instead of fetching (offline / reproducible; no browser) |
+| `--name NAME` | (required) | fund name exactly as in `recommendations.json` |
+| `--bucket B` | — | core / growth / aggressive / diversifier |
+| `--as-of YYYY-MM-DD` | (required) | date for manager-tenure math (kept explicit for reproducibility) |
+| `--playwright` / `--selenium` | urllib | fetch engine; `--selenium` auto-falls back to Playwright. VRO is behind Cloudflare + JS, so a real browser is required |
+| `--no-headless` | headless | show the browser window — **needed to clear Cloudflare's Turnstile** |
+| `--user-data-dir DIR` / `--login` | — | optional persistent/logged-in profile (usually unnecessary — panels render anonymously once the subscribe popup is closed) |
+| `--out FILE` | stdout | where the `funds[]` entry is written |
+
+`selection/manual_verify.py`:
+
+| Argument | Default | What it does |
+|---|---|---|
+| `--input FILE` | (required to assess) | filled `manual_verification.json` (one or more `funds[]` entries) |
+| `--report FILE` | — | `recommendations.json` (used by `--init` to scaffold, and to cross-check names) |
+| `--init` | off | write a blank template pre-filled with the current picks to `--out` |
+| `--out FILE` | — | report path (`.json` + a `.md` beside it) |
+
+Verdicts: `VERIFIED` (clean) / `REVIEW` (one soft flag — sub-category Sortino
+OR short manager tenure) / `WEAK` (both) / `REJECT` (Sortino below its own
+benchmark). Exit code `0` only if every fund is `VERIFIED`. The gate can only
+ever tighten — it never promotes or invents a pick.
 
 ### 4. Allocation planner — all arguments (`selection/mf_allocate.py`)
 
@@ -1023,9 +1071,73 @@ reproducible for a given download (NAVs update daily, so cross-day runs
 legitimately differ — that's the data, not the logic). Exit code is `0` only
 when **all** finalists PASS, so the step can gate an automated pipeline.
 
-**What this stage still does NOT cover** (remains on the manual checklist in
-`recommendations.md`): Sortino *vs category* (top-quartile), manager tenure,
-and full-holdings overlap for truncated tables.
+**What this stage still does NOT cover** — this is exactly what the Stage 3.5
+manual-verification gate below closes: Sortino *vs category* (top-quartile)
+and manager tenure. (Full-holdings overlap for truncated tables remains a
+manual checklist item.)
+
+## Manual-verification gate: Sortino + manager team via Value Research (`valueresearch.py`)
+
+**Runbook Stage 3.5 — optional, and the only stage that reads a second data
+source.** The Morningstar snapshot the engine runs on has no Sortino ratio and
+no full manager roster, so `recommendations.md` prints those as a *manual*
+checklist. This stage automates that check against **Value Research Online**
+and turns it into a deterministic gate. Two scripts, cleanly split:
+
+**`scraper/valueresearch.py` — fetch + parse (the data source).** For a fund's
+VRO page it extracts:
+- **Sortino**, read row-wise from the Risk table: row 1 = the fund, row 2 = its
+  benchmark, row 3 = its category (the column is located from the header, so a
+  VRO column re-order can't silently misread it). Sharpe/Std/Beta/Alpha are
+  kept too, for cross-checks.
+- **The full fund-manager team** from the Fund-Manager panel: every manager
+  with the date they took over *this* scheme, their experience and education.
+
+Fetching VRO is non-trivial and the code handles all three obstacles it hit in
+practice:
+1. **Cloudflare** — VRO is behind a Turnstile challenge; plain HTTP gets a
+   "Just a moment" page. A real browser clears it (`--playwright --no-headless`;
+   `--selenium` auto-falls back to Playwright).
+2. **The "Assess Risks" subscribe modal** (`#close-subscribe`) overlays and
+   gates the panel — it is auto-dismissed (best-effort, never fatal).
+3. **SPA routing** — the Risk (`#risk`) and Fund-Manager (`#other`) panels only
+   render on a *fresh* navigation to their fragment, each in its **own browser
+   context** (a second page in a shared context re-triggers Cloudflare). The
+   fetcher loads each fragment isolated, dismisses the popup, and combines the
+   two HTML payloads.
+
+Parsing is pure and deterministic (regex over served HTML) and unit-tested
+against captured fixtures; fetching is a thin, best-effort I/O layer, so
+`--html-file` gives a fully offline, reproducible run with no browser. Login is
+**not** required — the panels render anonymously once the popup is closed; a
+`--user-data-dir` / `--login` persistent-profile path exists as an optional
+fallback.
+
+**`selection/manual_verify.py` — the gate (the judgment).** It reads a
+`manual_verification.json` (one `funds[]` entry per pick — hand-filled, or
+produced by `valueresearch.py`) and applies **fixed, auditable thresholds**:
+- **Sortino**: must beat its own benchmark (else `FAIL`) and is expected to
+  beat the category average (else a soft `FLAG`).
+- **Manager tenure**: keyed on the **longest-tenured** hand on the scheme (not
+  the first name listed), so a fund fronted by a junior but overseen by a
+  multi-year veteran is not mis-flagged; the primary and full team stay visible.
+  `≥5y` strong, `≥3y` ok, `<2y` a flag.
+
+Per-fund verdict is the worst-of: `VERIFIED` (clean) → `REVIEW` (one soft flag)
+→ `WEAK` (sub-category Sortino *and* a <2y manager) → `REJECT` (Sortino below
+benchmark). Like every gate here it can only **tighten**; the output carries a
+`manual_hash` and, `--init` scaffolds the input template from the current picks.
+
+*Why the manager-team view matters (a real correction from this project):* a
+single-name reading flagged one diversifier pick as `WEAK` on a "1.4y junior
+manager". The full VRO roster showed an 8-person team whose longest-tenured
+manager has **6.8 years** on the scheme — moving the honest verdict to `REVIEW`.
+The snapshot engine and a one-name manual check both missed this; the team
+fetch is what caught it.
+
+> **Dependency note:** the browser fetch path needs Playwright
+> (`pip install playwright && playwright install chromium`); it is an *optional*
+> extra — `--html-file` and every deterministic stage work without it.
 
 ## Allocation planner: amount / risk / duration → exact breakdown (`mf_allocate.py`)
 

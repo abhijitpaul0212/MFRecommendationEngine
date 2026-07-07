@@ -7,3 +7,10 @@ webdriver-manager>=4.0
 
 # Test runner for the browserless pure-core suite (tests/test_morningstar_parse.py).
 pytest>=7.0
+
+# OPTIONAL — only for the Stage 3.5 Value Research browser fetch
+# (scraper/valueresearch.py). VRO is behind Cloudflare + JS; Playwright clears
+# it where Selenium can't. The parsers, the --html-file offline path, and every
+# other stage work WITHOUT it. After installing, also run once:
+#     playwright install chromium
+playwright>=1.40

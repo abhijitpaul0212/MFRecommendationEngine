@@ -618,11 +618,16 @@ def _selenium():
     return locals()
 
 
-def make_driver(headless=True):
+def make_driver(headless=True, user_data_dir=None):
     S = _selenium()
     opts = S["webdriver"].ChromeOptions()
     if headless:
         opts.add_argument("--headless=new")
+    if user_data_dir:
+        # reuse a persistent profile (e.g. a logged-in session for a
+        # login-gated site); point at a DEDICATED dir, not a Chrome profile
+        # that is currently open (Chrome locks it while running).
+        opts.add_argument(f"--user-data-dir={user_data_dir}")
     opts.add_argument("--window-size=1600,1000")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-blink-features=AutomationControlled")
