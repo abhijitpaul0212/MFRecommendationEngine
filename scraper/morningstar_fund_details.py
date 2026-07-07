@@ -87,6 +87,12 @@ POSTBACK_TIMEOUT = 30
 PAGE_LOAD_TIMEOUT = 90      # renderer stalls happen under parallel load
 MAX_PAGES_GUARD = 500       # hard stop against infinite pagination loops
 SESSION_RESTART_ATTEMPTS = 3  # browser (re)starts per worker before giving up
+LIST_RECYCLE_EVERY = 10     # proactively restart the browser every N houses in
+#                             the list phase: the fund-house select2 degrades
+#                             after many sequential changes in one session and
+#                             silently stops switching (root cause of the
+#                             2026-07 stale-grid corruption); a fresh session
+#                             well before that point prevents the stall
 REPAIR_ROUNDS = 2             # post-run completeness audit re-extraction passes
 SAL_WAIT_TIMEOUT = 45       # SAL widgets fetch data after page load
 SECONDS_PER_FUND_EST = 50   # for the runtime estimate printed before enrichment
@@ -540,6 +546,59 @@ def merge_list_preserving_enrichment(existing, fresh):
     return merged
 
 
+# --- Wrong-house / stale-grid corruption guards -----------------------------
+# Root cause seen 2026-07: under memory pressure the fund-house filter's
+# select2 pick or its ASP.NET postback silently no-ops, leaving the PREVIOUS
+# house's results on screen. list_house then captures those and saves them
+# under the requested house's name — and because the merge mirrors the fresh
+# list, it DELETES the requested house's real catalog. These three pure,
+# unit-tested predicates back the three layered guards in _list_worker /
+# set_filters (selection-took, cross-house-duplicate, wrong-house-overwrite).
+
+def house_selection_ok(selected_text, requested_house):
+    """True only when the fund-house dropdown's currently-selected option
+    matches the requested house. Empty, an 'All …' placeholder, or a
+    DIFFERENT house name all return False — the select never switched."""
+    s = (selected_text or "").strip().casefold()
+    r = (requested_house or "").strip().casefold()
+    if not s or not r or s.startswith("all "):
+        return False
+    return s == r
+
+
+def fund_name_overlap(a_names, b_names):
+    """Overlap of two fund-name sets as |A∩B| / min(|A|,|B|) — 1.0 when one is
+    a subset of the other, 0.0 when disjoint. 0.0 for either side empty."""
+    a, b = set(a_names), set(b_names)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def fund_set_signature(fund_data):
+    """Stable signature of a house's fund-NAME set (order-independent) — two
+    genuinely different houses never share one, so an identical signature
+    across two houses in one run means the grid didn't switch."""
+    return hashlib.sha256(
+        "\n".join(sorted(fund_data)).encode("utf-8")).hexdigest()
+
+
+def looks_like_wrong_house(existing, fresh, min_existing=50,
+                           shrink_ratio=0.5, max_overlap=0.1):
+    """True when `fresh` looks like a DIFFERENT house than the `existing`
+    on-disk data — the fingerprint of a stale-grid scrape that would delete a
+    real catalog. Conservative by design: fires only when the existing file
+    is substantial (>= min_existing), the fresh list is a big shrink
+    (< shrink_ratio × existing) AND the two barely overlap by name
+    (<= max_overlap). A genuine catalog shrink keeps the SAME funds (high
+    overlap), so it never trips this."""
+    if len(existing) < min_existing:
+        return False
+    if len(fresh) >= len(existing) * shrink_ratio:
+        return False
+    return fund_name_overlap(existing.keys(), fresh.keys()) <= max_overlap
+
+
 # ===========================================================================
 # 2) PAGE OBJECTS — selenium imported lazily so the pure core stays
 #    importable in browserless CI.
@@ -708,14 +767,32 @@ class FactsheetPage:
                 return
         raise RuntimeError(f"option '{text}' not found in select2 {sel_id}")
 
+    def _selected_option_text(self, select_el):
+        """Visible text of a <select>'s currently-selected option ('' on any
+        failure) — the form's own record of what will be submitted."""
+        try:
+            return self.S["Select"](select_el).first_selected_option.text.strip()
+        except Exception:
+            return ""
+
     def set_filters(self, fund_house):
         """Chosen fund house + defaults everywhere else, re-finding selects
-        after each change because postbacks stale them."""
+        after each change because postbacks stale them. GUARD A: verify the
+        fund-house selection actually registered — a silently-failed
+        select2/postback would otherwise leave the PREVIOUS house's results
+        on screen to be saved under this house's name (data corruption)."""
         for i, spec in enumerate(FILTERS):
             target = fund_house if spec["key"] == "fund_house" else spec["default"]
             selects = self._panel_selects()
             self._select2_pick(selects[i], target)
             self._wait_postback_complete()
+        # re-find (each postback staled the elements) and confirm the house took
+        selected = self._selected_option_text(self._panel_selects()[0])
+        if not house_selection_ok(selected, fund_house):
+            raise RuntimeError(
+                f"fund-house filter did not switch: requested "
+                f"'{fund_house}', dropdown shows '{selected or '(empty)'}' — "
+                f"refusing to scrape (would capture the wrong house's funds)")
 
     def click_go(self):
         self.click("btn_go")
@@ -1248,6 +1325,8 @@ class MorningstarScraper:
         self.house_urls = {}     # house -> {fund: href}
         self.failed_houses = {}
         self.fund_failures = {}  # house -> {fund: err}
+        self._list_signatures = {}  # fund-set signature -> house (GUARD B:
+        #                             cross-house stale-grid duplicate detect)
         # progress tracking for the CURRENT enrichment dispatch (owned by
         # _dispatch_enrichment — ENRICH and each REPAIR round reset it, so
         # counts can never overflow their phase's total)
@@ -1431,7 +1510,18 @@ class MorningstarScraper:
 
         try:
             d, page = fresh_session(None)
+            houses_since_recycle = 0
             for house in houses:
+                # PROACTIVE session recycle: the fund-house select2 degrades
+                # after many sequential changes in one browser and silently
+                # stops switching; a fresh session well before that point is
+                # the primary defence (the guards below are the safety net).
+                if houses_since_recycle >= LIST_RECYCLE_EVERY:
+                    print(f"  [w{worker_id}] recycling browser "
+                          f"(every {LIST_RECYCLE_EVERY} houses)", flush=True)
+                    d, page = fresh_session(d)
+                    houses_since_recycle = 0
+                houses_since_recycle += 1
                 # governor gate: waits for a slot; when fully paused, quit the
                 # browser so its RAM is actually returned to the OS
                 while not self._acquire_slot():
@@ -1473,7 +1563,10 @@ class MorningstarScraper:
                             self.failed_houses[house] = str(last_err or "no data")
                         continue
                     path = self._house_path(house)
+                    saved, recycle, merged = False, False, None
                     with self._lock:
+                        sig = fund_set_signature(fresh)
+                        twin = self._list_signatures.get(sig)
                         existing = {}
                         if os.path.exists(path):
                             try:
@@ -1481,13 +1574,45 @@ class MorningstarScraper:
                                     existing = json.load(f)
                             except Exception:
                                 existing = {}
-                        merged = merge_list_preserving_enrichment(existing, fresh)
-                        self.house_data[house] = merged
-                        self.house_urls[house] = urls
-                        atomic_write_json(path, merged)
-                    kept = sum(1 for v in merged.values() if "risk_ratings" in v)
-                    print(f"  [list] {house}: {len(merged)} funds "
-                          f"({kept} previously enriched preserved)", flush=True)
+                        if twin is not None and twin != house:
+                            # GUARD B: identical fund set to another house this
+                            # run -> the grid never switched (stale session).
+                            self.failed_houses[house] = (
+                                f"identical fund set to already-scraped "
+                                f"'{twin}' — house filter did not switch "
+                                f"(stale grid); refusing to save")
+                            recycle = True
+                        elif looks_like_wrong_house(existing, fresh):
+                            # GUARD C: big shrink + near-zero overlap would
+                            # delete a real catalog.
+                            self.failed_houses[house] = (
+                                f"suspected wrong-house scrape: {len(fresh)} "
+                                f"fresh funds vs {len(existing)} on disk with "
+                                f"near-zero name overlap — refusing to "
+                                f"overwrite (would delete real data)")
+                            recycle = True
+                        else:
+                            merged = merge_list_preserving_enrichment(
+                                existing, fresh)
+                            self._list_signatures[sig] = house
+                            self.house_data[house] = merged
+                            self.house_urls[house] = urls
+                            atomic_write_json(path, merged)
+                            saved = True
+                    if saved:
+                        kept = sum(1 for v in merged.values()
+                                   if "risk_ratings" in v)
+                        print(f"  [list] {house}: {len(merged)} funds "
+                              f"({kept} previously enriched preserved)",
+                              flush=True)
+                    else:
+                        print(f"  [list] SKIP '{house}': "
+                              f"{self.failed_houses[house]}", flush=True)
+                    if recycle:
+                        # REACTIVE recycle: a stale grid means the session has
+                        # degraded — restart it so the next house starts clean.
+                        d, page = fresh_session(d)
+                        houses_since_recycle = 0
                 finally:
                     self._release_slot()
         finally:

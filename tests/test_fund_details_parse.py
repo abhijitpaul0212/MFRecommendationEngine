@@ -309,3 +309,53 @@ def test_merge_list_preserving_enrichment():
 def test_clean_collapses_whitespace():
     assert fd.clean("  %  Assets in\n  Top 10 Holdings ") == "% Assets in Top 10 Holdings"
     assert fd.clean(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# Wrong-house / stale-grid corruption guards (the 2026-07 data-loss bug)
+# ---------------------------------------------------------------------------
+def test_house_selection_ok_requires_exact_match():
+    ok = fd.house_selection_ok
+    assert ok("SBI Funds Management Ltd", "SBI Funds Management Ltd")
+    assert ok("  sbi funds management ltd ", "SBI Funds Management Ltd")  # case/space
+    # the corruption case: dropdown still shows the previous house
+    assert not ok("Jio BlackRock Asset Management Pvt Ltd", "SBI Funds Management Ltd")
+    assert not ok("", "SBI Funds Management Ltd")               # nothing selected
+    assert not ok("All Fund Houses", "SBI Funds Management Ltd")  # placeholder
+    assert not ok("SBI Funds Management Ltd", "")               # no request
+
+
+def test_fund_name_overlap():
+    assert fd.fund_name_overlap(["a", "b", "c"], ["a", "b"]) == 1.0   # subset
+    assert fd.fund_name_overlap(["a", "b"], ["c", "d"]) == 0.0        # disjoint
+    assert fd.fund_name_overlap(["a", "b", "c", "d"], ["a", "b"]) == 1.0
+    assert fd.fund_name_overlap([], ["a"]) == 0.0
+    assert fd.fund_name_overlap(["a", "b"], ["a", "x"]) == 0.5
+
+
+def test_fund_set_signature_is_order_independent_and_distinguishing():
+    a = {"SBI Bluechip": {}, "SBI Small Cap": {}}
+    b = {"SBI Small Cap": {}, "SBI Bluechip": {}}   # same set, different order
+    c = {"JioBlackRock Flexi Cap": {}}
+    assert fd.fund_set_signature(a) == fd.fund_set_signature(b)
+    assert fd.fund_set_signature(a) != fd.fund_set_signature(c)
+
+
+def test_looks_like_wrong_house_catches_the_corruption():
+    # existing = SBI's real ~100 funds; fresh = the 16 leaked JioBlackRock ones
+    existing = {f"SBI Fund {i}": {} for i in range(100)}
+    fresh = {f"JioBlackRock Fund {i}": {} for i in range(16)}
+    assert fd.looks_like_wrong_house(existing, fresh) is True
+
+
+def test_looks_like_wrong_house_allows_genuine_shrink_and_small_houses():
+    # a genuine catalog shrink keeps the SAME funds (high overlap) -> allowed
+    existing = {f"SBI Fund {i}": {} for i in range(100)}
+    shrunk = {f"SBI Fund {i}": {} for i in range(40)}   # fewer, but same names
+    assert fd.looks_like_wrong_house(existing, shrunk) is False
+    # a small existing file (< min_existing) is never guarded (can't be sure)
+    tiny = {f"X {i}": {} for i in range(10)}
+    other = {f"Y {i}": {} for i in range(3)}
+    assert fd.looks_like_wrong_house(tiny, other) is False
+    # first-ever scrape (nothing on disk) is always allowed
+    assert fd.looks_like_wrong_house({}, fresh={"A": {}}) is False
