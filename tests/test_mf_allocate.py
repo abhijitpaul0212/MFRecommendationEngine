@@ -169,3 +169,36 @@ def test_stage3_blockers_missing_run_or_verdict_warns():
         PICKS4, [{"fund": "Core Fund", "verdict": "PASS"}])
     assert blockers == []
     assert sum("no Stage 3 verdict" in w for w in warnings) == 3
+
+
+def test_build_follow_up_command_uses_failed_fund():
+    args = type("Args", (), {
+        "report": "recommendation_run/recommendations.json",
+        "amount": 20000,
+        "risk": "moderate",
+        "years": 10,
+    })()
+    blockers = ["'Core Fund' FAILED the Stage 3 rolling-return check"]
+    cmd = al.build_follow_up_command(args, blockers)
+    assert "mf_recommend.py" in cmd
+    assert "--exclude 'Core Fund'" in cmd
+    assert "mf_allocate.py" in cmd
+
+
+def test_render_markdown_plan_includes_stage3_warning_suggestion():
+    plan = {"rows": [], "warnings": [
+        "'Kotak Multicap Fund Direct Growth' has no Stage 3 verdict — "
+        "re-run nav_rolling_check.py on this report"
+    ]}
+    md = al.render_markdown_plan(
+        plan,
+        amount_line="₹100,000 lumpsum",
+        risk="moderate",
+        years=10,
+        band="10-15y",
+        report_hash="abc123",
+        plan_hash="def456",
+        note="test note",
+    )
+    assert "### Warnings" in md
+    assert "re-run nav_rolling_check.py on this report" in md

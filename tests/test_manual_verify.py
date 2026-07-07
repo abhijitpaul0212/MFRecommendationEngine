@@ -14,6 +14,30 @@ def test_tenure_years_is_explicit_and_reproducible():
     assert mv.tenure_years("2020-01-01", None) is None
 
 
+def test_collect_recommendation_funds_reads_bench_picks():
+    report = {
+        "bench": [
+            {"bucket": "core", "pick": "HDFC Flexi Cap Fund Direct Growth"},
+            {"bucket": "growth", "pick": "WhiteOak Capital Mid Cap Fund Direct Growth"},
+        ]
+    }
+    assert mv.collect_recommendation_funds(report) == [
+        {"fund": "HDFC Flexi Cap Fund Direct Growth", "bucket": "core"},
+        {"fund": "WhiteOak Capital Mid Cap Fund Direct Growth", "bucket": "growth"},
+    ]
+
+
+def test_resolve_scraper_html_fixture_falls_back_to_repo_fixture(tmp_path):
+    repo_root = tmp_path / "repo"
+    rec_dir = repo_root / "recommendation_run"
+    rec_dir.mkdir(parents=True)
+    fixture = rec_dir / "vro_example.html"
+    fixture.write_text("<html></html>", encoding="utf-8")
+
+    assert mv.resolve_scraper_html_fixture(
+        "Any Fund", html_file=None, base_dir=str(repo_root)) == str(fixture)
+
+
 # ---- sortino --------------------------------------------------------------
 def test_sortino_pass_beats_both():
     status, _ = mv.assess_sortino(1.19, 0.61, 0.74)

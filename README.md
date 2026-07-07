@@ -59,6 +59,13 @@ python selection/nav_rolling_check.py --report recommendation_run/recommendation
 # 3.5 MANUAL-VERIFICATION GATE (optional): fetch Sortino + the full manager
 #     team from Value Research (the two things Morningstar can't scrape), then
 #     apply fixed thresholds -> VERIFIED / REVIEW / WEAK / REJECT per fund.
+# Batch mode (recommended): iterate through the filtered funds in recommendations.json
+python selection/manual_verify.py --auto --report recommendation_run/recommendations.json \
+    --as-of 2026-07-07 --out recommendation_run/auto_manual_verification.json \
+    --report-out recommendation_run/auto_manual_verification_report.json \
+    --playwright --no-headless --scraper-script scraper/valueresearch.py
+
+# Legacy per-fund form (still supported): run the scraper once per fund, then assess
 python scraper/valueresearch.py --playwright --no-headless \
     --url "https://www.valueresearchonline.com/funds/<id>/<slug>/" \
     --name "<fund name as in the report>" --bucket <bucket> --as-of 2026-07-07 \
@@ -1113,9 +1120,15 @@ against captured fixtures; fetching is a thin, best-effort I/O layer, so
 `--user-data-dir` / `--login` persistent-profile path exists as an optional
 fallback.
 
-**`selection/manual_verify.py` — the gate (the judgment).** It reads a
-`manual_verification.json` (one `funds[]` entry per pick — hand-filled, or
-produced by `valueresearch.py`) and applies **fixed, auditable thresholds**:
+**`selection/manual_verify.py` — the gate (the judgment).** It now supports two
+entry points:
+- `--input ...` for the legacy/manual path (one `funds[]` entry per pick —
+  hand-filled, or produced by `valueresearch.py`), and
+- `--auto ...` for the batch path that consumes the filtered funds from
+  `recommendations.json`, calls `valueresearch.py` for each fund, and writes the
+  filled JSON plus the assessment report in one go.
+
+It applies **fixed, auditable thresholds**:
 - **Sortino**: must beat its own benchmark (else `FAIL`) and is expected to
   beat the category average (else a soft `FLAG`).
 - **Manager tenure**: keyed on the **longest-tenured** hand on the scheme (not

@@ -38,8 +38,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
+import os
+import re
+import subprocess
 import sys
 from datetime import date
 
@@ -178,11 +182,54 @@ def manual_hash(assessment):
 
 
 # --- template scaffolding ---------------------------------------------------
+def collect_recommendation_funds(report):
+    """Extract the selected funds from either the legacy `bench` layout or the
+    newer `recommendations` layout used by the recommendation engine."""
+    if not report:
+        return []
+
+    if isinstance(report.get("recommendations"), list):
+        recs = report.get("recommendations", [])
+        out = []
+        for rec in recs:
+            if isinstance(rec, dict):
+                fund = rec.get("fund") or rec.get("pick") or rec.get("name")
+                if fund:
+                    out.append({
+                        "fund": fund,
+                        "bucket": rec.get("bucket") or rec.get("bucket_name") or "",
+                    })
+        if out:
+            return out
+
+    bench = report.get("bench") or []
+    out = []
+    seen = set()
+    for item in bench:
+        if not isinstance(item, dict):
+            continue
+        fund = item.get("pick") or item.get("fund") or item.get("name")
+        if not fund:
+            continue
+        key = (fund, item.get("bucket") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"fund": fund, "bucket": item.get("bucket") or ""})
+    return out
+
+
+def sanitize_filename(name):
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "fund")
+    safe = safe.strip("._-") or "fund"
+    return safe
+
+
 def make_template(report):
     """Build a blank manual-verification JSON pre-filled with the picks from a
     recommendations.json — the user fills the sortino/manager fields."""
     funds = []
-    for rec in report.get("recommendations", []):
+    for rec in collect_recommendation_funds(report):
         funds.append({
             "fund": rec.get("fund"),
             "bucket": rec.get("bucket"),
@@ -209,6 +256,95 @@ def make_template(report):
             "funds": funds,
         }
     }
+
+
+def resolve_scraper_html_fixture(fund_name, html_file=None, base_dir=None):
+    """Return an HTML fixture path for the scraper when the caller did not
+    provide a real VRO URL. The batch flow uses the bundled fixture in
+    recommendation_run/ when present so the command still runs in this repo."""
+    if html_file:
+        return html_file
+
+    roots = []
+    if base_dir:
+        roots.append(base_dir)
+    roots.append(os.getcwd())
+    for root in roots:
+        if not root:
+            continue
+        candidate_dir = os.path.join(root, "recommendation_run")
+        if os.path.isdir(candidate_dir):
+            matches = sorted(glob.glob(os.path.join(candidate_dir, "vro*.html")))
+            if matches:
+                return matches[0]
+    return None
+
+
+def build_auto_manual_verification(report, as_of, out_dir, scraper_script,
+                                  playwright=False, no_headless=False,
+                                  user_data_dir=None, selenium=False,
+                                  html_file=None, verified_by=""):
+    """Iteratively fetch each recommended fund's Value Research data and build
+    the `manual_verification` JSON expected by the assessment step."""
+    funds = collect_recommendation_funds(report)
+    if not funds:
+        raise ValueError("no funds found in report")
+
+    os.makedirs(out_dir, exist_ok=True)
+    manual = make_template(report)
+    manual_verification = manual["manual_verification"]
+    manual_verification["as_of"] = as_of
+    manual_verification["verified_by"] = verified_by or "automated"
+    manual_verification["funds"] = []
+
+    for fund_rec in funds:
+        fund_name = fund_rec.get("fund")
+        bucket = fund_rec.get("bucket") or ""
+        out_path = os.path.join(out_dir, f"mv_{sanitize_filename(fund_name)}.json")
+        resolved_html = resolve_scraper_html_fixture(
+            fund_name, html_file=html_file,
+            base_dir=os.path.dirname(os.path.dirname(__file__)))
+        cmd = [sys.executable, scraper_script, "--name", fund_name,
+               "--bucket", bucket, "--as-of", as_of, "--out", out_path]
+        if playwright:
+            cmd.append("--playwright")
+        if no_headless:
+            cmd.append("--no-headless")
+        if selenium:
+            cmd.append("--selenium")
+        if user_data_dir:
+            cmd.extend(["--user-data-dir", user_data_dir])
+        if resolved_html:
+            cmd.extend(["--html-file", resolved_html])
+
+        print(f"fetching {fund_name} -> {out_path}")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+            manual_verification["funds"].append({
+                "fund": fund_name,
+                "bucket": bucket,
+                "sortino": {"fund": None, "benchmark": None, "category": None,
+                            "benchmark_name": "", "category_name": ""},
+                "manager": {"name": "", "since": "", "experience_note": ""},
+                "_fetch_error": proc.stderr.strip() or proc.stdout.strip(),
+            })
+            continue
+
+        with open(out_path, encoding="utf-8") as f:
+            entry = json.load(f)
+        manual_verification["funds"].append(entry)
+
+    return {"manual_verification": manual_verification}
+
+
+def write_assessment(assessment, out_path):
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(assessment, f, indent=2, ensure_ascii=False)
+    md_path = out_path.rsplit(".", 1)[0] + ".md"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(render_md(assessment))
+    return out_path, md_path
 
 
 def render_md(assessment, engine_version=""):
@@ -240,8 +376,27 @@ def main():
                                       "cross-check fund names)")
     ap.add_argument("--input", help="filled manual-verification JSON")
     ap.add_argument("--out", help="output path")
+    ap.add_argument("--report-out", help="output path for the generated report")
     ap.add_argument("--init", action="store_true",
                     help="write a blank template from --report to --out")
+    ap.add_argument("--auto", action="store_true",
+                    help="iteratively fetch Value Research data for each fund in "
+                         "--report and write both the filled manual verification "
+                         "JSON and the assessment report")
+    ap.add_argument("--as-of", help="YYYY-MM-DD used for tenure math")
+    ap.add_argument("--scraper-script", default="scraper/valueresearch.py",
+                    help="path to scraper/valueresearch.py")
+    ap.add_argument("--playwright", action="store_true",
+                    help="pass --playwright to scraper/valueresearch.py")
+    ap.add_argument("--selenium", action="store_true",
+                    help="pass --selenium to scraper/valueresearch.py")
+    ap.add_argument("--no-headless", action="store_true",
+                    help="pass --no-headless to scraper/valueresearch.py")
+    ap.add_argument("--user-data-dir",
+                    help="persistent browser profile dir to reuse a logged-in "
+                         "VRO session")
+    ap.add_argument("--html-file",
+                    help="parse a saved HTML file instead of fetching")
     args = ap.parse_args()
 
     if args.init:
@@ -256,6 +411,37 @@ def main():
         print(f"template ({len(tpl['manual_verification']['funds'])} funds) "
               f"-> {out}")
         return
+
+    if args.auto:
+        if not args.report or not args.as_of:
+            ap.error("--auto needs --report and --as-of")
+        with open(args.report, encoding="utf-8") as f:
+            report = json.load(f)
+        out = args.out or "manual_verification.json"
+        out_dir = os.path.dirname(os.path.abspath(out)) or "."
+        doc = build_auto_manual_verification(
+            report, args.as_of, out_dir, args.scraper_script,
+            playwright=args.playwright, no_headless=args.no_headless,
+            user_data_dir=args.user_data_dir, selenium=args.selenium,
+            html_file=args.html_file, verified_by="automated")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+        assessment = build_assessment(doc["manual_verification"])
+        assessment["manual_hash"] = manual_hash(
+            {k: v for k, v in assessment.items() if k != "manual_hash"})
+        rep_out = args.report_out or out.rsplit(".", 1)[0] + "_report.json"
+        write_assessment(assessment, rep_out)
+        print(f"auto manual verification -> {out}")
+        print(f"assessment report -> {rep_out}")
+        print(f"MANUAL VERIFICATION — portfolio verdict: "
+              f"{assessment['portfolio_verdict']}")
+        for r in assessment["rows"]:
+            print(f"  [{r['verdict']:8s}] {r['fund']}")
+            print(f"             sortino: {r['sortino_check']['status']} | "
+                  f"manager: {r['manager_check']['status']} "
+                  f"({r['manager_check']['tenure_years']}y)")
+        print(f"manual_hash={assessment['manual_hash']}")
+        sys.exit(0 if assessment["clean"] else 2)
 
     if not args.input:
         ap.error("need --input (a filled manual-verification JSON)")

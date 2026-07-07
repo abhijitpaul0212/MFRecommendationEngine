@@ -63,6 +63,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 
@@ -319,6 +320,53 @@ def _prompt_missing(args):
                       flush=True)
 
 
+def build_follow_up_command(args, blockers):
+    """Return a copy-pasteable command that suggests the next recovery step
+    after Stage 3 blockers stop allocation."""
+    failed = []
+    for b in blockers:
+        m = re.search(r"'([^']+)'", b)
+        if m:
+            failed.append(m.group(1))
+    if not failed:
+        return None
+
+    parts = [
+        "python selection/mf_recommend.py",
+        "--data ms_data",
+        "--out recommendation_run",
+        "--exclude",
+        "'" + failed[0] + "'",
+    ]
+    if args.report:
+        parts.extend(["&&", "python selection/mf_allocate.py",
+                      "--report", args.report, "--amount", str(args.amount),
+                      "--risk", args.risk, "--years", str(args.years)])
+    return " ".join(parts)
+
+
+def render_markdown_plan(plan, amount_line, risk, years, band, report_hash,
+                         plan_hash, note):
+    """Render the allocation plan as markdown, including warnings."""
+    lines = ["# Investment Allocation Plan", "",
+             f"- {amount_line}  |  risk: {risk}  |  "
+             f"duration: {years:g}y (band {band})",
+             f"- engine report: `{(report_hash or '')[:16]}…`  |  "
+             f"plan_hash: `{plan_hash[:16]}…`", "",
+             f"| Fund | Bucket | % | Amount (₹) |", "|---|---|---|---|"]
+    for r in plan["rows"]:
+        lines.append(f"| {r['fund']} | {r['bucket']} | {r['pct']} | "
+                     f"{r['amount_inr']:,} |")
+    lines += ["| **Total** | | **100** | "
+              f"**{sum(r['amount_inr'] for r in plan['rows']):,}** |", ""]
+    if plan.get("warnings"):
+        lines.append("### Warnings")
+        lines += [f"- ⚠ {w}" for w in plan["warnings"]]
+        lines.append("")
+    lines.append(f"_{note}_")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Stage 4 — exact percent + rupee allocation across the "
@@ -391,6 +439,10 @@ def main():
             print(f"BLOCKED: {b}", flush=True)
         print("no plan written — resolve the failed pick(s) first "
               "(or pass --allow-failed to override).", flush=True)
+        follow_up = build_follow_up_command(args, blockers)
+        if follow_up:
+            print("Suggested next command:", flush=True)
+            print(f"  {follow_up}", flush=True)
         return 1
 
     try:
@@ -440,25 +492,19 @@ def main():
     amount_line = (f"₹{args.amount:,}/month via SIP (day {args.sip_day}, "
                    f"starting {args.start_date})" if args.frequency == "sip"
                    else f"₹{args.amount:,} lumpsum")
-    lines = ["# Investment Allocation Plan", "",
-             f"- {amount_line}  |  risk: {args.risk}  |  "
-             f"duration: {args.years:g}y (band {plan['band']})",
-             f"- engine report: `{(rep.get('run_hash') or '')[:16]}…`  |  "
-             f"plan_hash: `{out['plan_hash'][:16]}…`", "",
-             f"| Fund | Bucket | % | {amount_col} |", "|---|---|---|---|"]
-    for r in plan["rows"]:
-        lines.append(f"| {r['fund']} | {r['bucket']} | {r['pct']} | "
-                     f"{r['amount_inr']:,} |")
-    lines += ["| **Total** | | **100** | "
-              f"**{sum(r['amount_inr'] for r in plan['rows']):,}** |", ""]
-    if plan["warnings"]:
-        lines.append("### Warnings")
-        lines += [f"- ⚠ {w}" for w in plan["warnings"]]
-        lines.append("")
-    lines.append(f"_{out['note']}_")
+    markdown = render_markdown_plan(
+        plan,
+        amount_line=amount_line,
+        risk=args.risk,
+        years=args.years,
+        band=plan["band"],
+        report_hash=rep.get("run_hash"),
+        plan_hash=out["plan_hash"],
+        note=out["note"],
+    )
     with open(os.path.join(out_dir, "allocation_plan.md"), "w",
               encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write(markdown.replace("| Amount (₹) |", f"| {amount_col} |"))
 
     print(f"Allocation ({args.risk}, {args.years:g}y -> band {plan['band']}, "
           f"{amount_line}):", flush=True)
