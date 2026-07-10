@@ -1315,10 +1315,28 @@ alpha / manager tenure over crash resilience, the analysis is already done:
   particular has the best *long-term* rolling record (Stage 3 worst-5Y +0.079).
   Weigh both if reconsidering.
 
-**Open allocation choices** (funds are settled): horizon is recorded at 12y
-(50 / 31 / 19); a 15y setting gives the less core-heavy 44 / 31 / 25. Plan is
-currently `lumpsum` — switch to `--frequency sip` (with `--sip-day` /
-`--start-date`) if investing monthly, so Stage 5 can replay installments.
+**Diversifier slot — three external candidates checked (2026-07-08).** A
+second-opinion model proposed filling the empty diversifier bucket to remove
+the 50% core concentration; all three of its picks were run through the
+pipeline (universe/gate check + live Stage 3) before rejecting:
+
+| Candidate | Universe status | Stage 3 | Why (not) |
+|---|---|---|---|
+| Motilal Oswal S&P 500 Index Fund | not enriched, engine-blind | **SHORT_HISTORY** (6.19y, needs 7y) | Same gate that dropped WhiteOak/Kotak earlier — accepting it here would be inconsistent. Also: SEBI/RBI's $7B overseas cap was exhausted again in Apr–May 2026 (Axis MF suspended fresh overseas SIP registrations 6 May 2026, Nippon 21 Apr 2026) — a **fresh** SIP registration is operationally uncertain. And it's not even a clean diversifier: Parag Parikh already holds **12.07% in S&P 500 mega-caps** (Alphabet 4.8%, Amazon 2.5%, Meta 2.5%, Microsoft 2.2%) |
+| UTI Nifty 50 Index Fund | not enriched, engine-blind | PASS, but worst-5Y only +0.017, 5Y Sortino 0.34 | **Ruled out on overlap, not weakness:** Parag Parikh's holdings are measured at **~59.6% Nifty 50 constituent names** already (HDFC Bank 7.9%, Power Grid 6.4%, ITC 5.8%, Coal India 5.7%, ICICI 5.1%, …) — a Nifty 50 fund would blow the 10% pairwise-overlap cap several times over |
+| ICICI Prudential Multi-Asset Fund | enriched, **fails 8 gates** | PASS — worst-5Y +0.040, 5Y Sortino **1.92** (best measured of any candidate) | Gate failures are mechanical, not performance-based: Morningstar publishes no alpha/beta/R²/category columns for this fund, so `data_complete` and every category-relative check fail by the "never guess missing data" rule. Live numbers are genuinely strong — a defensible *ungated* pick if the volatility cushion matters more than engine certification, but it sits outside the framework's guarantees |
+
+**Verdict: keep the 3-fund ladder as-is; none of the three clears every gate
+today.** Revisit **Motilal Oswal S&P 500 at the ~2027 cycle** — by then it
+crosses the 7-year history gate and the overseas cap situation may have
+eased (AMFI is lobbying RBI to raise it). ICICI Multi-Asset remains a
+manual/exception addition if wanted sooner; UTI Nifty 50 is a no under any
+framing (overlap, not weakness).
+
+**Open allocation choices** (funds are settled): horizon is 12y (50 / 31 / 19);
+a 15y setting gives the less core-heavy 44 / 31 / 25. Plan is **SIP, ₹20,000
+/month, day 2, first installment 2026-08-02** — recorded in
+`recommendation_run/allocation_plan.json` so Stage 5 can replay installments.
 
 ## Dormant alternate engine: NAV-based deterministic selection (`mf_select.py`)
 
