@@ -1333,6 +1333,24 @@ eased (AMFI is lobbying RBI to raise it). ICICI Multi-Asset remains a
 manual/exception addition if wanted sooner; UTI Nifty 50 is a no under any
 framing (overlap, not weakness).
 
+**Gold (e.g. Nippon India Gold Savings Fund) — a different LAYER, not a
+diversifier-bucket candidate (2026-07-11).** Checked because it was proposed
+as a diversifier fit: `Category = "Sector - Precious Metals"`, not in the
+engine's `universe.buckets.diversifier` list, and it has no `risk_ratings`
+in `ms_data` (gold has no alpha-vs-category, beta-vs-Nifty, or R² — every
+equity-relative gate is meaningless for it), so it can never enter the
+universe. This is not a data gap to fix; it is a **category mismatch by
+design**. The engine's four buckets (core/growth/aggressive/diversifier) are
+all equity, split by company-size risk (beta bands 1.00/1.15/1.15/1.05); the
+"diversifier" bucket only diversifies *investment style within equity*
+(Value/Contra/Dividend/Multi-Cap/hybrid-allocation) — which is exactly why
+its own candidates keep failing on overlap (they still hold the same
+large-caps as the core). A gold fund diversifies *asset class*, a decision
+one layer above what this equity-only pipeline makes. If wanted, size it as
+a **separate small overlay outside the ₹20,000/month equity SIP** (e.g. a
+few thousand ₹/month, sized against the whole portfolio including debt/EPF/
+PPF/emergency fund) — not a swap for the diversifier slot.
+
 **Open allocation choices** (funds are settled): horizon is 12y (50 / 31 / 19);
 a 15y setting gives the less core-heavy 44 / 31 / 25. Plan is **SIP, ₹20,000
 /month, day 2, first installment 2026-08-02** — recorded in
